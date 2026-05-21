@@ -1841,8 +1841,9 @@ local CONFIG_FILE=$1; local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAM
 local TMP_FILE="/tmp/vpsbox_test_config.json"
 if [ -f "$CONFIG_FILE" ] && grep -q "inbounds" "$CONFIG_FILE"; then
 echo -e "${YELLOW}[系统] 检测到已有配置，正在生成并验证测试配置...${NC}"
-if [ "$CORE_NAME" == "Sing-box" ]; then jq --argjson new_in "$NEW_INBOUND" --argjson port "$TARGET_PORT" 'del(.inbounds[] | select(.listen_port == $port)) | .inbounds += [$new_in]' "$CONFIG_FILE" > "$TMP_FILE"
-else jq --argjson new_in "$NEW_INBOUND" --argjson port "$TARGET_PORT" 'del(.inbounds[] | select(.port == $port)) | .inbounds += [$new_in]' "$CONFIG_FILE" > "$TMP_FILE"; fi
+if [ "$CORE_NAME" == "Sing-box" ]; then jq --argjson new_in "$NEW_INBOUND" --argjson port "$TARGET_PORT" 'del(.inbounds[] | select(.listen_port == $port)) | .inbounds += [$new_in]' "$CONFIG_FILE" > "$TMP_FILE" 2>/dev/null
+else jq --argjson new_in "$NEW_INBOUND" --argjson port "$TARGET_PORT" 'del(.inbounds[] | select(.port == $port)) | .inbounds += [$new_in]' "$CONFIG_FILE" > "$TMP_FILE" 2>/dev/null; fi
+if [ ! -s "$TMP_FILE" ]; then echo -e "\n${RED}[错误] 配置合并失败，可能是已有配置文件格式异常${NC}"; echo -e "${YELLOW}当前配置内容:${NC}"; head -20 "$CONFIG_FILE"; return 1; fi
 else
 echo -e "${YELLOW}[系统] 首次部署，正在初始化并验证配置文件...${NC}"
 if [ "$CORE_NAME" == "Sing-box" ]; then cat > "$TMP_FILE" <<EOF
@@ -1854,10 +1855,30 @@ EOF
 fi
 fi
 local TEST_PASS=0
-if [ "$CORE_NAME" == "Sing-box" ]; then local SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); if "$SB_BIN" check -c "$TMP_FILE" >/dev/null 2>&1; then TEST_PASS=1; fi
-else local X_BIN=$(command -v xray || echo "/usr/local/bin/xray"); if "$X_BIN" run -test -c "$TMP_FILE" >/dev/null 2>&1; then TEST_PASS=1; fi
+local VALIDATE_OUT; VALIDATE_OUT=$(mktemp)
+if [ "$CORE_NAME" == "Sing-box" ]; then
+    local SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box")
+    # sing-box check 不校验字段完整性，改用 run 模式做 3 秒存活测试
+    # 先停掉旧服务（如果有），测试完不恢复——因为马上要用新配置重启
+    local SB_WAS_RUNNING=0; if _svc_is_active sing-box 2>/dev/null; then SB_WAS_RUNNING=1; _svc_stop sing-box 2>/dev/null; sleep 1; fi
+    if "$SB_BIN" run -c "$TMP_FILE" >"$VALIDATE_OUT" 2>&1 & local SB_PID=$!; then :; fi
+    sleep 3
+    if kill -0 "$SB_PID" 2>/dev/null; then
+        TEST_PASS=1
+        kill "$SB_PID" 2>/dev/null; wait "$SB_PID" 2>/dev/null
+        # 不恢复旧服务，留给 install_anytls_node 的 _svc_restart 统一启动
+    else
+        wait "$SB_PID" 2>/dev/null; local SB_EXIT=$?
+        echo "sing-box 启动后立即退出 (exit=$SB_EXIT)" >> "$VALIDATE_OUT"
+        # 测试失败：恢复旧服务
+        if [ "$SB_WAS_RUNNING" -eq 1 ]; then _svc_start sing-box 2>/dev/null; fi
+    fi
+else
+    local X_BIN=$(command -v xray || echo "/usr/local/bin/xray")
+    if "$X_BIN" run -test -c "$TMP_FILE" >"$VALIDATE_OUT" 2>&1; then TEST_PASS=1; fi
 fi
-if [ "$TEST_PASS" -eq 1 ]; then mv "$TMP_FILE" "$CONFIG_FILE"; return 0; else rm -f "$TMP_FILE"; return 1; fi
+if [ "$TEST_PASS" -eq 1 ]; then mv "$TMP_FILE" "$CONFIG_FILE"; rm -f "$VALIDATE_OUT"; return 0
+else echo -e "\n${RED}[校验错误]${NC}"; cat "$VALIDATE_OUT" 2>/dev/null; rm -f "$TMP_FILE" "$VALIDATE_OUT"; return 1; fi
 }
 
 # 统一内核选择 (返回 1 或 2, 0取消则 return 1)
@@ -1892,8 +1913,18 @@ output_node_result() {
         echo -e "${YELLOW}>>> 扫描下方二维码快速导入节点：${NC}"
         qrencode -t UTF8 -s 1 -m 2 "$LINK"
         echo "${CORE_NAME}-${LABEL} | 端口:${PORT} | ${LINK}" >> "$NODE_RECORD_FILE"
+    elif [ "$SERVICE_STATUS" == "config_error" ]; then
+        echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合核心要求，未修改任何文件。${NC}"
+    elif [ "$SERVICE_STATUS" == "inactive" ]; then
+        echo -e "\n${RED}[错误] 配置写入成功，但服务启动失败。${NC}"
+        echo -e "${YELLOW}>>> 可能原因:${NC}"
+        echo -e "  • 端口 ${PORT} 被占用 → ${CYAN}ss -tlnp | grep :${PORT}${NC}"
+        echo -e "  • 证书不可读 → ${CYAN}ls -la ${CERT_DIR}/*.pem${NC}"
+        echo -e "  • 服务崩溃 → ${CYAN}journalctl -u ${CORE_NAME,,} -n 20 --no-pager${NC}"
+        # 回滚：上次成功的配置已被 mv 覆盖，无法自动恢复，建议手动修复
+        echo -e "\n${YELLOW}>>> 新配置已写入（校验通过），建议手动排错后重启: systemctl restart ${CORE_NAME,,}${NC}"
     else
-        echo -e "\n${RED}[错误] 配置校验失败或服务拒绝启动，未保存任何变更！${NC}"
+        echo -e "\n${RED}[错误] 未知错误 (SERVICE_STATUS=${SERVICE_STATUS})${NC}"
     fi
 }
 
@@ -1907,7 +1938,7 @@ read -r -p "> 请输入监听端口 (默认 50000, 0 取消): " PORT
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=50000
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo -e "${RED}[错误] 端口号必须是 1 到 65535 之间的纯数字！请重新输入。${NC}"; continue; fi
-if ss -tulpn | grep -qw ":$PORT"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
+if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
 break
 done
 core_choice=$(select_core) || return
@@ -1945,8 +1976,92 @@ output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME"
 pause_for_enter
 }
 
+install_anytls_node() {
+clear_screen; print_divider
+print_center "[ 部署 AnyTLS 节点 ]" "$CYAN"
+echo -e "${YELLOW}>>> 小白科普：AnyTLS 使用标准 TLS 加密 + 域名真证书。TCP 直连，无额外传输层包装，速度最快。需要自有域名，建议套 CDN 抗封锁。${NC}\n"
+
+while true; do
+read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
+DOMAIN="${DOMAIN// /}"
+if [ "$DOMAIN" == "0" ]; then return; fi
+if [ -z "$DOMAIN" ]; then continue; fi
+DOMAIN_IP=$(ping -c 1 -n "$DOMAIN" 2>/dev/null | head -n 1 | awk -F '[()]' '{print $2}')
+break
+done
+
+while true; do
+read -r -p "> 监听端口 (默认 443, 0 取消): " PORT
+PORT="${PORT// /}"
+if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=443
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then continue; fi
+if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}端口 $PORT 已被占用！${NC}"; continue; fi
+break
+done
+if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
+core_choice=$(select_core) || return
+
+echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
+echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
+while true; do
+read -r -p "> 选择模式 [1-2, 默认 2, 0 取消]: " cert_mode
+cert_mode="${cert_mode// /}"
+if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
+if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
+if [ "$cert_mode" == "1" ]; then
+echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token 和 Account ID？${NC}"
+echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
+echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
+echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
+echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
+echo -e "  ${GREEN}5.${NC} Account ID: 返回仪表盘主页，右侧「⋮」→ 复制账户 ID"
+echo ""
+read -r -p "> 请输入您的 Cloudflare API Token: " CF_Token
+if [ -z "$CF_Token" ]; then continue; fi
+read -r -p "> 请输入您的 Cloudflare Account ID: " CF_Account_ID
+if [ -z "$CF_Account_ID" ]; then continue; fi
+export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"; break
+elif [ "$cert_mode" == "2" ]; then
+if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then
+echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
+echo -e "${YELLOW}  ⚠️  可能开启了 Cloudflare 小黄云，请去 CF 控制台关闭该域名的代理（改为灰色云朵），或者换用 API 模式申请证书。${NC}"
+read -r -p "> 是否强行继续？(y/n, 默认 n): " force_continue
+if [[ ! "${force_continue// /}" =~ ^[yY]$ ]]; then continue; fi
+fi
+break
+fi
+done
+
+if ! confirm_action "开始部署 AnyTLS 节点并申请证书"; then pause_for_enter; return; fi
+acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_enter; return; }
+
+# 确保证书文件存在
+if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
+    echo -e "\n${RED}[错误] 证书文件缺失: $CERT_DIR/${NC}"
+    ls -la "$CERT_DIR/" 2>/dev/null
+    pause_for_enter; return
+fi
+
+UUID=$(cat /proc/sys/kernel/random/uuid)
+LINK_IP="$DOMAIN"
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]}}}'
+if append_inbound "/usr/local/etc/xray/config.json" "$NEW_INBOUND" "$PORT" "Xray"; then _svc_restart xray && _svc_enable xray >/dev/null 2>&1; _svc_is_active xray && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+else
+CORE_NAME="Sing-box"
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_restart sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+fi
+LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2,http/1.1&type=tcp#AnyTLS"
+output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME"
+pause_for_enter
+}
+
 # =====================================================================
-# 统一证书申请函数 (被 WS-TLS 和 Hysteria2 共用)
+# 统一证书申请函数 (被 WS-TLS / AnyTLS / Hysteria2 共用)
 # 参数: DOMAIN cert_mode CF_Token CF_Account_ID
 # 返回: 0=成功, 1=失败; 设置全局变量 CERT_DIR
 # =====================================================================
@@ -1997,7 +2112,25 @@ acquire_cert() {
     fi
 
     CERT_DIR="/etc/vpsbox-cert"; mkdir -p "$CERT_DIR"
-    /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc --fullchain-file "$CERT_DIR/fullchain.pem" --key-file "$CERT_DIR/privkey.pem" --reloadcmd "_svc_restart xray 2>/dev/null; _svc_restart sing-box 2>/dev/null" >/dev/null 2>&1
+    echo -e "\n${CYAN}>>> 正在安装证书到 ${CERT_DIR}...${NC}"
+    local INSTALL_OUT; INSTALL_OUT=$(mktemp)
+    if /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+        --fullchain-file "$CERT_DIR/fullchain.pem" \
+        --key-file "$CERT_DIR/privkey.pem" \
+        --reloadcmd "systemctl restart xray 2>/dev/null; systemctl restart sing-box 2>/dev/null; service xray restart 2>/dev/null; service sing-box restart 2>/dev/null" \
+        >"$INSTALL_OUT" 2>&1; then
+        cat "$INSTALL_OUT"; rm -f "$INSTALL_OUT"
+        echo -e "${GREEN}[成功] 证书已安装至 ${CERT_DIR}${NC}"
+    else
+        echo -e "\n${RED}[错误] 证书安装失败，acme.sh 输出:${NC}"
+        cat "$INSTALL_OUT"; rm -f "$INSTALL_OUT"
+        return 1
+    fi
+    # 验证证书文件有效性
+    if ! openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -dates 2>/dev/null; then
+        echo -e "${RED}[错误] 证书文件无效或格式错误${NC}"
+        return 1
+    fi
     chmod 755 "$CERT_DIR"; chmod 644 "$CERT_DIR"/*.pem; chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null
     return 0
 }
@@ -2020,7 +2153,7 @@ read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT
 WS_PORT="${WS_PORT// /}"
 if [ "$WS_PORT" == "0" ]; then return; fi; [ -z "$WS_PORT" ] && WS_PORT=443
 if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65535 ]; then continue; fi
-if ss -tulpn | grep -qw ":$WS_PORT"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
+if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
 break
 done
 core_choice=$(select_core) || return
@@ -2088,7 +2221,7 @@ read -r -p "> 监听端口 (默认 8443, 0 取消): " HY2_PORT
 HY2_PORT="${HY2_PORT// /}"
 if [ "$HY2_PORT" == "0" ]; then return; fi; [ -z "$HY2_PORT" ] && HY2_PORT=8443
 if ! [[ "$HY2_PORT" =~ ^[0-9]+$ ]] || [ "$HY2_PORT" -lt 1 ] || [ "$HY2_PORT" -gt 65535 ]; then continue; fi
-if ss -tulpn | grep -qw ":$HY2_PORT"; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
+if ss -tulpn | grep -qE ":${HY2_PORT}[[:space:]]|:${HY2_PORT}$"; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
 break
 done
 core_choice=$(select_core) || return
@@ -2737,12 +2870,13 @@ echo -e "  ${GREEN}16.${NC} BBR 拥塞控制管理"
 
 echo -e "\n  ${CYAN}▶ 节点部署${NC}"
 echo -e "  ${GREEN}17.${NC} IP 质量与流媒体检测 ${GREEN}18.${NC} 部署 VLESS-Reality"
-echo -e "  ${GREEN}19.${NC} 部署 VLESS-WS-TLS  ${GREEN}20.${NC} 部署 Hysteria2"
-echo -e "  ${GREEN}21.${NC} 查看已部署节点      ${GREEN}22.${NC} 删除指定节点"
+echo -e "  ${GREEN}19.${NC} 部署 VLESS-WS-TLS  ${GREEN}20.${NC} 部署 AnyTLS"
+echo -e "  ${GREEN}21.${NC} 部署 Hysteria2      ${GREEN}22.${NC} 查看已部署节点"
+echo -e "  ${GREEN}23.${NC} 删除指定节点"
 
 echo -e "\n  ${CYAN}▶ 工具与安全${NC}"
-echo -e "  ${GREEN}23.${NC} Docker 一键安装     ${GREEN}24.${NC} Fail2Ban 防暴力破解"
-echo -e "  ${GREEN}25.${NC} WARP 解锁           ${GREEN}26.${NC} UFW 防火墙管理"
+echo -e "  ${GREEN}24.${NC} Docker 一键安装     ${GREEN}25.${NC} Fail2Ban 防暴力破解"
+echo -e "  ${GREEN}26.${NC} WARP 解锁           ${GREEN}27.${NC} UFW 防火墙管理"
 echo -e "  ${GREEN}00.${NC} 脚本管理（更新/卸载）"
 
 echo -e "\n  ${GREEN} 0.${NC} 退出"
@@ -2760,7 +2894,7 @@ else
     echo ""
 fi
 echo ""
-read -r -p "> 请输入选择 [0-26,00]: " OPTION
+read -r -p "> 请输入选择 [0-27,00]: " OPTION
 OPTION="${OPTION// /}"
 case $OPTION in
  1) system_overview ;;
@@ -2782,13 +2916,14 @@ case $OPTION in
 17) check_media_unlock ;;
 18) install_reality_node ;;
 19) install_ws_tls_node ;;
-20) install_hy2_node ;;
-21) view_deployed_nodes ;;
-22) delete_node ;;
-23) docker_install ;;
-24) fail2ban_install ;;
-25) install_warp ;;
-26) manage_ufw ;;
+20) install_anytls_node ;;
+21) install_hy2_node ;;
+22) view_deployed_nodes ;;
+23) delete_node ;;
+24) docker_install ;;
+25) fail2ban_install ;;
+26) install_warp ;;
+27) manage_ufw ;;
 00) manage_script ;; 
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
