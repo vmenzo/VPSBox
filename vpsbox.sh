@@ -2117,7 +2117,6 @@ acquire_cert() {
     if /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
         --fullchain-file "$CERT_DIR/fullchain.pem" \
         --key-file "$CERT_DIR/privkey.pem" \
-        --reloadcmd "systemctl restart xray 2>/dev/null; systemctl restart sing-box 2>/dev/null; service xray restart 2>/dev/null; service sing-box restart 2>/dev/null" \
         >"$INSTALL_OUT" 2>&1; then
         cat "$INSTALL_OUT"; rm -f "$INSTALL_OUT"
         echo -e "${GREEN}[成功] 证书已安装至 ${CERT_DIR}${NC}"
