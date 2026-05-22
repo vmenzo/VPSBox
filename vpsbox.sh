@@ -150,11 +150,18 @@ _svc_is_active() {
   if command -v apk &>/dev/null; then service "$1" status &>/dev/null
   else /bin/systemctl is-active --quiet "$1"; fi
 }
-# 热重载：发 SIGHUP 让 sing-box 重读配置，不中断连接。失败不回退 restart
+# 热重载：发 SIGHUP 让 sing-box 重读配置，不中断连接
 _svc_reload() {
   if _svc_is_active "$1" 2>/dev/null; then
-    if command -v apk &>/dev/null; then service "$1" reload 2>/dev/null || true
-    else /bin/systemctl reload "$1" 2>/dev/null || /bin/kill -HUP $(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2) 2>/dev/null || true; fi
+    if command -v apk &>/dev/null; then
+      service "$1" reload 2>/dev/null && return 0
+    else
+      /bin/systemctl reload "$1" 2>/dev/null && return 0
+      local PID; PID=$(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2)
+      [ -n "$PID" ] && /bin/kill -HUP "$PID" 2>/dev/null && return 0
+    fi
+    echo -e "${YELLOW}[警告] $1 热重载失败，新配置未生效。请稍后手动: systemctl restart $1${NC}" >&2
+    return 1
   else
     _svc_start "$1"
   fi
