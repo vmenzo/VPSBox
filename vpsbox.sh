@@ -153,14 +153,20 @@ _svc_is_active() {
 # 热重载：发 SIGHUP 让 sing-box 重读配置，不中断连接
 _svc_reload() {
   if _svc_is_active "$1" 2>/dev/null; then
+    local OLD_PID; OLD_PID=$(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2)
     if command -v apk &>/dev/null; then
       service "$1" reload 2>/dev/null && return 0
     else
       /bin/systemctl reload "$1" 2>/dev/null && return 0
-      local PID; PID=$(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2)
-      [ -n "$PID" ] && /bin/kill -HUP "$PID" 2>/dev/null && return 0
+      [ -n "$OLD_PID" ] && /bin/kill -HUP "$OLD_PID" 2>/dev/null && return 0
     fi
-    echo -e "${YELLOW}[警告] $1 热重载失败，新配置未生效。请稍后手动: systemctl restart $1${NC}" >&2
+    # 校验 PID 是否变化（变了说明是 restart 不是 reload，连接已断）
+    local NEW_PID; NEW_PID=$(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2)
+    if [ -n "$OLD_PID" ] && [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ]; then
+      echo -e "${RED}[错误] $1 意外重启 (PID $OLD_PID → $NEW_PID)，连接已中断！${NC}" >&2
+    else
+      echo -e "${YELLOW}[警告] $1 热重载失败，新配置未生效。请稍后手动: systemctl restart $1${NC}" >&2
+    fi
     return 1
   else
     _svc_start "$1"
