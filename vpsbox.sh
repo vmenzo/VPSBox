@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# VPSBOX_VERSION=v1.0
+# VPSBOX_VERSION=v1.1
 # =====================================================================
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -150,11 +150,11 @@ _svc_is_active() {
   if command -v apk &>/dev/null; then service "$1" status &>/dev/null
   else /bin/systemctl is-active --quiet "$1"; fi
 }
-# 热重载：服务运行中则 reload（不中断连接），否则 start
+# 热重载：发 SIGHUP 让 sing-box 重读配置，不中断连接。失败不回退 restart
 _svc_reload() {
   if _svc_is_active "$1" 2>/dev/null; then
-    if command -v apk &>/dev/null; then service "$1" reload 2>/dev/null || service "$1" restart
-    else /bin/systemctl reload "$1" 2>/dev/null || /bin/systemctl restart "$1"; fi
+    if command -v apk &>/dev/null; then service "$1" reload 2>/dev/null || true
+    else /bin/systemctl reload "$1" 2>/dev/null || /bin/kill -HUP $(systemctl show -p MainPID "$1" 2>/dev/null | cut -d= -f2) 2>/dev/null || true; fi
   else
     _svc_start "$1"
   fi
