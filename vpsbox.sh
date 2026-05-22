@@ -1988,83 +1988,42 @@ pause_for_enter
 install_anytls_node() {
 clear_screen; print_divider
 print_center "[ 部署 AnyTLS 节点 ]" "$CYAN"
-echo -e "${YELLOW}>>> 小白科普：AnyTLS 使用标准 TLS 加密 + 域名真证书。TCP 直连，无额外传输层包装，速度最快。需要自有域名，建议套 CDN 抗封锁。${NC}\n"
+echo -e "${YELLOW}>>> 小白科普：AnyTLS 是 sing-box 专属协议，类似 Reality。无需域名和证书，直接借用大厂 SNI 伪装。密码认证，配置极其简单。${NC}\n"
 
 while true; do
-read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
-DOMAIN="${DOMAIN// /}"
-if [ "$DOMAIN" == "0" ]; then return; fi
-if [ -z "$DOMAIN" ]; then continue; fi
-DOMAIN_IP=$(ping -c 1 -n "$DOMAIN" 2>/dev/null | head -n 1 | awk -F '[()]' '{print $2}')
-break
-done
-
-while true; do
-read -r -p "> 监听端口 (默认 443, 0 取消): " PORT
+read -r -p "> 监听端口 (默认 22429, 0 取消): " PORT
 PORT="${PORT// /}"
-if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=443
+if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=22429
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then continue; fi
 if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}端口 $PORT 已被占用！${NC}"; continue; fi
 break
 done
-if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
-core_choice=$(select_core) || return
 
-echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
-echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
-while true; do
-read -r -p "> 选择模式 [1-2, 默认 2, 0 取消]: " cert_mode
-cert_mode="${cert_mode// /}"
-if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
-if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
-if [ "$cert_mode" == "1" ]; then
-echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token 和 Account ID？${NC}"
-echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
-echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
-echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
-echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
-echo -e "  ${GREEN}5.${NC} Account ID: 返回仪表盘主页，右侧「⋮」→ 复制账户 ID"
-echo ""
-read -r -p "> 请输入您的 Cloudflare API Token: " CF_Token
-if [ -z "$CF_Token" ]; then continue; fi
-read -r -p "> 请输入您的 Cloudflare Account ID: " CF_Account_ID
-if [ -z "$CF_Account_ID" ]; then continue; fi
-export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"; break
-elif [ "$cert_mode" == "2" ]; then
-if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then
-echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
-echo -e "${YELLOW}  ⚠️  可能开启了 Cloudflare 小黄云，请去 CF 控制台关闭该域名的代理（改为灰色云朵），或者换用 API 模式申请证书。${NC}"
-read -r -p "> 是否强行继续？(y/n, 默认 n): " force_continue
-if [[ ! "${force_continue// /}" =~ ^[yY]$ ]]; then continue; fi
-fi
-break
-fi
-done
+echo -e "\n  ${GREEN}1.${NC} www.apple.com (苹果官网)\n  ${GREEN}2.${NC} www.microsoft.com (微软官网)"
+read -r -p "> 选择伪装 SNI [1-2 或自定义域名, 默认 1, 0 取消]: " peer_choice
+peer_choice="${peer_choice// /}"
+if [ "$peer_choice" == "0" ]; then return; fi
+if [[ -z "$peer_choice" || "$peer_choice" == "1" ]]; then PEER="www.apple.com"
+elif [[ "$peer_choice" == "2" ]]; then PEER="www.microsoft.com"
+else PEER="$peer_choice"; fi
 
-if ! confirm_action "开始部署 AnyTLS 节点并申请证书"; then pause_for_enter; return; fi
-acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_enter; return; }
+if ! confirm_action "开始部署 AnyTLS 节点"; then pause_for_enter; return; fi
+install_dependencies
 
-# 确保证书文件存在
-if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
-    echo -e "\n${RED}[错误] 证书文件缺失: $CERT_DIR/${NC}"
-    ls -la "$CERT_DIR/" 2>/dev/null
-    pause_for_enter; return
-fi
-
-UUID=$(cat /proc/sys/kernel/random/uuid)
-LINK_IP="$DOMAIN"
-if [ "$core_choice" == "1" ]; then
-CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]}}}'
-if append_inbound "/usr/local/etc/xray/config.json" "$NEW_INBOUND" "$PORT" "Xray"; then _svc_restart xray && _svc_enable xray >/dev/null 2>&1; _svc_is_active xray && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
-else
-CORE_NAME="Sing-box"
+# sing-box 专属协议
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+
+SB_BIN=$(command -v sing-box); KEYS=$("$SB_BIN" generate reality-keypair)
+PRI=$(echo "$KEYS" | awk -F'[: ]+' '/PrivateKey/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/PublicKey/{print $NF}')
+PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
+
+CORE_NAME="Sing-box"
+NEW_INBOUND='{"type":"anytls","listen":"::","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$PEER'","reality":{"enabled":true,"handshake":{"server":"'$PEER'","server_port":443},"private_key":"'$PRI'"}}}'
 if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
-fi
-LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2,http/1.1&type=tcp#AnyTLS"
+
+LINK_IP="$SERVER_IP"
+if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then LINK_IP="[$SERVER_IPV6]"; fi
+LINK="anytls://${PASSWORD}@${LINK_IP}:${PORT}?peer=${PEER}&udp=1#AnyTLS-${PORT}"
 output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME"
 pause_for_enter
 }
