@@ -150,6 +150,15 @@ _svc_is_active() {
   if command -v apk &>/dev/null; then service "$1" status &>/dev/null
   else /bin/systemctl is-active --quiet "$1"; fi
 }
+# 热重载：服务运行中则 reload（不中断连接），否则 start
+_svc_reload() {
+  if _svc_is_active "$1" 2>/dev/null; then
+    if command -v apk &>/dev/null; then service "$1" reload 2>/dev/null || service "$1" restart
+    else /bin/systemctl reload "$1" 2>/dev/null || /bin/systemctl restart "$1"; fi
+  else
+    _svc_start "$1"
+  fi
+}
 _svc_daemon_reload() {
   if command -v apk &>/dev/null; then return 0
   else /bin/systemctl daemon-reload 2>/dev/null; fi
@@ -1769,7 +1778,7 @@ if [[ "$n_res_opt" =~ ^[0-9]+$ ]] && [ "$n_res_opt" -ge 1 ] && [ "$n_res_opt" -l
 if ! confirm_action "还原此备份 (当前配置将被覆盖，且服务会重启)" "n"; then continue; fi
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
 [ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" /usr/local/etc/xray/config.json && _svc_restart xray
-[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && _svc_restart sing-box
+[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && _svc_reload sing-box
 [ -f "$sel_bk/vpsbox_nodes.txt" ] && cp "$sel_bk/vpsbox_nodes.txt" "$NODE_RECORD_FILE"
 echo -e "\n${GREEN}[成功] 节点配置已成功还原！服务已尝试重启。${NC}"; pause_for_enter
 else
@@ -1825,7 +1834,7 @@ if [ -f "/etc/sing-box/config.json" ]; then
 if jq -e ".inbounds[] | select(.listen_port == $del_port)" /etc/sing-box/config.json > /dev/null 2>&1; then
 jq "del(.inbounds[] | select(.listen_port == $del_port))" /etc/sing-box/config.json > /tmp/sb_tmp.json
 if [ -s /tmp/sb_tmp.json ]; then
-mv /tmp/sb_tmp.json /etc/sing-box/config.json; _svc_restart sing-box
+mv /tmp/sb_tmp.json /etc/sing-box/config.json; _svc_reload sing-box
 echo -e "${GREEN}[成功] 已成功移除 Sing-box 中占用端口 $del_port 的节点配置！${NC}"
 else
 rm -f /tmp/sb_tmp.json; echo -e "${RED}[错误] Sing-box 节点删除失败，配置可能受损！${NC}"
@@ -1969,7 +1978,7 @@ if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
-if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_restart sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
 fi
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
 output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME"
@@ -2053,7 +2062,7 @@ else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
-if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_restart sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
 fi
 LINK="vless://${UUID}@${DOMAIN}:${PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2,http/1.1&type=tcp#AnyTLS"
 output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME"
@@ -2187,7 +2196,7 @@ else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
-if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$WS_PORT" "Sing-box"; then _svc_restart sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$WS_PORT" "Sing-box"; then _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
 fi
 LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2,http/1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
 output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME"
@@ -2267,7 +2276,7 @@ else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"hysteria2","listen":"::","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
-if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$HY2_PORT" "Sing-box"; then _svc_restart sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
+if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$HY2_PORT" "Sing-box"; then _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1; _svc_is_active sing-box && SERVICE_STATUS="active" || SERVICE_STATUS="inactive"; else SERVICE_STATUS="config_error"; fi
 fi
 LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&insecure=0#H2"
 output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME"
