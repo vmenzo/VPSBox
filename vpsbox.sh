@@ -3,10 +3,16 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
+VPSBOX_VERSION="v1.3"
 
 # 修复 curl | bash 吞噬 stdin 导致无法交互输入的问题
+# 多重回退：/dev/tty → /dev/stdin → 保持原样（配合后续空输入检测）
 if [ ! -t 0 ]; then
-    exec < /dev/tty
+    if [ -r /dev/tty ]; then
+        exec < /dev/tty 2>/dev/null || true
+    elif [ -r /proc/self/fd/0 ]; then
+        exec < /proc/self/fd/0 2>/dev/null || true
+    fi
 fi
 
 RED='\033[0;31m'
@@ -1924,17 +1930,15 @@ LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${
 if append_inbound "/usr/local/etc/xray/config.json" "$NEW_INBOUND" "$PORT" "Xray" 2>/dev/null || append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box" 2>/dev/null; then
     # 先输出节点信息，防止重载断网导致用户看不到信息
     output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME"
-    echo -e "\n${YELLOW}>>> [注意] 正在重载核心服务以应用新配置...${NC}"
-    echo -e "${YELLOW}如果您当前通过现有节点连接 SSH，连接可能会断开。若卡死请直接重连！${NC}"
+    echo -e "\n${YELLOW}>>> [注意] 正在后台重载代理核心以应用新配置...${NC}"
+    echo -e "${YELLOW}>>> 节点信息已保存，若当前 SSH 通过本节点代理连接，重载时可能短暂卡顿，稍后重连即可。${NC}"
     
-    # 免疫 SIGHUP 断开信号
-    trap '' HUP
+    # 修复：后台异步重载，输出重定向防止阻塞 SSH 会话
     if [ "$CORE_NAME" == "Xray" ]; then
-        _svc_restart xray && _svc_enable xray >/dev/null 2>&1
+        ( sleep 1; _svc_restart xray && _svc_enable xray >/dev/null 2>&1 ) &
     else
-        _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1
+        ( sleep 1; _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1 ) &
     fi
-    trap - HUP
 else
     echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合要求，未修改任何文件。${NC}"
 fi
@@ -2001,10 +2005,8 @@ LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}&udp=1#AnyTLS-${PORT}
 
 if append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$PORT" "Sing-box"; then
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME"
-    echo -e "\n${YELLOW}>>> [注意] 正在重载核心服务以应用新配置... (若断网卡死请直接重连)${NC}"
-    trap '' HUP
-    _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1
-    trap - HUP
+    echo -e "\n${YELLOW}>>> [注意] 正在后台重载核心服务以应用新配置...${NC}"
+    ( sleep 1; _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1 ) &
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -2012,7 +2014,7 @@ pause_for_enter
 }
 
 # =====================================================================
-# 统一证书申请函数 (修复证书循环复用 Bug)
+# 统一证书申请函数 (修复版 v1.3: 按域名分离 CERT_DIR + 彻底清理失败残留)
 # =====================================================================
 acquire_cert() {
     local DOMAIN="$1"
@@ -2020,22 +2022,31 @@ acquire_cert() {
     local CF_Token="$3"
     local CF_Account_ID="$4"
 
+    # 按域名分离证书目录，杜绝不同域名复用同一证书
+    CERT_DIR="/etc/vpsbox-cert/${DOMAIN}"
+    mkdir -p "$CERT_DIR"
+
     install_dependencies
     [ ! -d "/root/.acme.sh" ] && curl https://get.acme.sh | sh -s email=dummy@vpsbox.com >/dev/null 2>&1
     if [ ! -f "/root/.acme.sh/acme.sh" ]; then echo -e "\n${RED}[错误] Acme.sh 安装失败！${NC}"; return 1; fi
     /root/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
     /root/.acme.sh/acme.sh --register-account -m dummy@vpsbox.com >/dev/null 2>&1
-    echo -e "\n${CYAN}>>> 正在申请 SSL 证书...${NC}\n${YELLOW}   DNS 验证可能需要 30-60 秒，请耐心等待${NC}"
+    echo -e "\n${CYAN}>>> 正在为 ${YELLOW}${DOMAIN}${CYAN} 申请 SSL 证书...${NC}\n${YELLOW}   DNS 验证可能需要 30-60 秒，请耐心等待${NC}"
 
     local PORT_80_SERVICE=""
     local CERT_RES=1
 
-    # 修复逻辑：不仅看 list 还要检查物理文件，防止坏文件被复用
+    # 修复：不仅看 acme.sh list 还要检查物理文件 + 目标目录证书有效性
     if /root/.acme.sh/acme.sh --list | grep -q "$DOMAIN"; then
         if [ -f "/root/.acme.sh/${DOMAIN}_ecc/${DOMAIN}.cer" ] || [ -f "/root/.acme.sh/${DOMAIN}/${DOMAIN}.cer" ]; then
-            echo -e "${GREEN}[成功] 检测到本地有效证书，复用机制触发！${NC}"
-            CERT_RES=0
+            # 进一步验证：目标 CERT_DIR 中的证书是否存在且属于该域名
+            if [ -f "$CERT_DIR/fullchain.pem" ] && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -subject 2>/dev/null | grep -qi "$DOMAIN"; then
+                echo -e "${GREEN}[成功] 检测到本地有效证书（域名匹配），复用机制触发！${NC}"
+                CERT_RES=0
+            else
+                echo -e "${YELLOW}[提示] 检测到 acme.sh 证书记录但目标证书目录不匹配，将重新安装证书到 ${CERT_DIR}${NC}"
+            fi
         else
             echo -e "${YELLOW}[警告] 检测到损坏的历史证书记录，正在深度清理并重新申请...${NC}"
             /root/.acme.sh/acme.sh --remove -d "$DOMAIN" >/dev/null 2>&1
@@ -2064,14 +2075,17 @@ acquire_cert() {
         fi
     fi
 
-    if [ "$CERT_RES" -ne 0 ] && [ "$CERT_RES" -ne 2 ]; then
-        echo -e "\n${RED}[错误] 证书申请失败，清理残留配置以防后续无限复用错误记录。${NC}"
+    # 修复：移除死条件 (CERT_RES 永不为 2)，直接判断是否失败
+    if [ "$CERT_RES" -ne 0 ]; then
+        echo -e "\n${RED}[错误] 证书申请失败，彻底清理所有残留以防后续无限复用错误记录。${NC}"
+        # 清理 acme.sh 记录
         /root/.acme.sh/acme.sh --remove -d "$DOMAIN" >/dev/null 2>&1
         rm -rf "/root/.acme.sh/${DOMAIN}_ecc" "/root/.acme.sh/${DOMAIN}"
+        # 清理目标证书目录（防止旧证书被下一个部署复用）
+        rm -rf "$CERT_DIR"
         return 1
     fi
 
-    CERT_DIR="/etc/vpsbox-cert"; mkdir -p "$CERT_DIR"
     echo -e "\n${CYAN}>>> 正在安装证书到 ${CERT_DIR}...${NC}"
     local INSTALL_OUT; INSTALL_OUT=$(mktemp)
     if /root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
@@ -2083,11 +2097,14 @@ acquire_cert() {
     else
         echo -e "\n${RED}[错误] 证书安装失败，acme.sh 输出:${NC}"
         cat "$INSTALL_OUT"; rm -f "$INSTALL_OUT"
+        # 安装失败也要清理目标目录，防止残留
+        rm -rf "$CERT_DIR"
         return 1
     fi
 
     if ! openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -dates 2>/dev/null; then
         echo -e "${RED}[错误] 证书文件无效或格式错误${NC}"
+        rm -rf "$CERT_DIR"
         return 1
     fi
     chmod 755 "$CERT_DIR"; chmod 644 "$CERT_DIR"/*.pem; chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null
@@ -2152,14 +2169,12 @@ LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DO
 
 if append_inbound "/usr/local/etc/xray/config.json" "$NEW_INBOUND" "$WS_PORT" "Xray" 2>/dev/null || append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$WS_PORT" "Sing-box" 2>/dev/null; then
     output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME"
-    echo -e "\n${YELLOW}>>> [注意] 正在重载核心服务以应用新配置... (若断网卡死请直接重连)${NC}"
-    trap '' HUP
+    echo -e "\n${YELLOW}>>> [注意] 正在后台重载核心服务以应用新配置...${NC}"
     if [ "$CORE_NAME" == "Xray" ]; then
-        _svc_restart xray && _svc_enable xray >/dev/null 2>&1
+        ( sleep 1; _svc_restart xray && _svc_enable xray >/dev/null 2>&1 ) &
     else
-        _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1
+        ( sleep 1; _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1 ) &
     fi
-    trap - HUP
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -2245,14 +2260,12 @@ LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&insecure=0#H2
 
 if append_inbound "/usr/local/etc/xray/config.json" "$NEW_INBOUND" "$HY2_PORT" "Xray" 2>/dev/null || append_inbound "/etc/sing-box/config.json" "$NEW_INBOUND" "$HY2_PORT" "Sing-box" 2>/dev/null; then
     output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME"
-    echo -e "\n${YELLOW}>>> [注意] 正在重载核心服务以应用新配置... (若断网卡死请直接重连)${NC}"
-    trap '' HUP
+    echo -e "\n${YELLOW}>>> [注意] 正在后台重载核心服务以应用新配置...${NC}"
     if [ "$CORE_NAME" == "Xray" ]; then
-        _svc_restart xray && _svc_enable xray >/dev/null 2>&1
+        ( sleep 1; _svc_restart xray && _svc_enable xray >/dev/null 2>&1 ) &
     else
-        _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1
+        ( sleep 1; _svc_reload sing-box && _svc_enable sing-box >/dev/null 2>&1 ) &
     fi
-    trap - HUP
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -2770,10 +2783,8 @@ manage_script() {
 while true; do
 clear_screen; print_divider
 print_center "[ VPSBox 脚本管理 ]" "$CYAN"
-local local_ver=$(grep -oE 'v[0-9.]+' "$0" 2>/dev/null | head -1)
-[ -z "$local_ver" ] && local_ver=$(grep -oE 'v[0-9.]+' "$SHORTCUT_PATH" 2>/dev/null | head -1)
-[ -z "$local_ver" ] && local_ver="未知"
-local remote_ver=$(curl -sL --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oE 'v[0-9.]+' | head -1)
+local local_ver="${VPSBOX_VERSION:-未知}"
+local remote_ver=$(curl -sL --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP 'VPSBOX_VERSION=\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
 [ -n "$remote_ver" ] && echo -e "  ${CYAN}最新版本:${NC} ${GREEN}${remote_ver}${NC}" || echo -e "  ${YELLOW}无法获取远程版本${NC}"
 
@@ -2841,9 +2852,25 @@ print_divider
 echo ""
 if [ "$_VER_CHECKED" -eq 0 ]; then
     _VER_CHECKED=1
-    _rmt=$(curl -sL --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP 'VPSBOX_VERSION=v\K[0-9.]+' | head -1)
-    if [ -n "$_rmt" ] && [ "$_rmt" != "1.0" ]; then
-        echo -e "   ${GREEN}[新版本可用] v${_rmt} → 请选择 00 更新${NC}"
+    # 从远程脚本提取版本号（VPSBOX_VERSION="vX.Y"）
+    _rmt=$(curl -sL --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP 'VPSBOX_VERSION=\K[^"]+' | head -1)
+    # 本地版本号（去掉 v 前缀用于比较）
+    local_ver="${VPSBOX_VERSION#v}"
+    if [ -n "$_rmt" ] && [ -n "$local_ver" ] && [ "$_rmt" != "$local_ver" ]; then
+        # semver 简单比较：按 . 分割后逐段比较
+        IFS='.' read -ra rmt_parts <<< "$_rmt"
+        IFS='.' read -ra loc_parts <<< "$local_ver"
+        newer=0
+        for i in 0 1 2; do
+            r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
+            if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
+            if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
+        done
+        if [ "$newer" -eq 1 ]; then
+            echo -e "   ${GREEN}[新版本可用] ${_rmt} (当前: ${local_ver}) → 请选择 00 更新${NC}"
+        else
+            echo ""
+        fi
     else
         echo ""
     fi
@@ -2853,6 +2880,12 @@ fi
 echo ""
 read -r -p "> 请输入选择 [0-27,00]: " OPTION
 OPTION="${OPTION// /}"
+# 修复：curl|bash 管道关闭时 read 收到 EOF 导致空输入，优雅退出而非死循环弹错误
+if [ -z "$OPTION" ]; then
+    echo -e "\n${RED}[提示] 检测到输入流异常（可能是管道模式运行），请使用 ${GREEN}vpsbox${NC} 命令直接启动。${NC}"
+    echo -e "${YELLOW}正在安全退出...${NC}\n"
+    exit 1
+fi
 case $OPTION in
  1) system_overview ;;
  2) system_update ;;
