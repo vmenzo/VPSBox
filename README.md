@@ -13,8 +13,10 @@ VPS 全功能管理脚本，集系统优化、BBR 内核管理、三协议节点
 ### 快速开始
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh | bash
+bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 ```
+
+> 兼容传统管道方式：`curl -fsSL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh | bash`
 
 首次运行自动注册 `vpsbox` 全局命令，后续直接敲 `vpsbox` 进入主菜单。
 
