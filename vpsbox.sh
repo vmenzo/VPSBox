@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3.8"
+VPSBOX_VERSION="v1.3.9"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -34,26 +34,15 @@ exit 1
 fi
 # 退出时清理临时测试配置文件
 trap 'rm -f /tmp/vpsbox_test_config.json' EXIT
-# 自动注册全局命令 (首次运行时复制到系统路径；管道模式自动重新下载)
+# 自动注册全局命令（后台异步，不阻塞启动）
 if [ "$0" != "$SHORTCUT_PATH" ] && [ ! -s "$SHORTCUT_PATH" ]; then
     if [ ! -t 0 ]; then
-        # 管道模式(curl|bash)：脚本无实体文件，直接从 GitHub 下载
-        if command -v curl &>/dev/null && curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null; then
-            chmod +x "$SHORTCUT_PATH"
-            echo -e "${GREEN}[提示] 已自动注册全局命令: vpsbox${NC}"
-        elif command -v wget &>/dev/null && wget -q --timeout=10 -O "$SHORTCUT_PATH" "$SCRIPT_URL" 2>/dev/null; then
-            chmod +x "$SHORTCUT_PATH"
-            echo -e "${GREEN}[提示] 已自动注册全局命令: vpsbox${NC}"
-        fi
+        # 管道模式：后台下载，不阻塞菜单
+        { curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null && chmod +x "$SHORTCUT_PATH"; } &
     elif [ -f "$0" ] && cp "$0" "$SHORTCUT_PATH" 2>/dev/null; then
         chmod +x "$SHORTCUT_PATH"
-        echo -e "${GREEN}[提示] 已自动注册全局命令: vpsbox${NC}"
-    elif command -v curl &>/dev/null && curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null; then
-        chmod +x "$SHORTCUT_PATH"
-        echo -e "${GREEN}[提示] 已自动注册全局命令: vpsbox${NC}"
-    elif command -v wget &>/dev/null && wget -q --timeout=10 -O "$SHORTCUT_PATH" "$SCRIPT_URL" 2>/dev/null; then
-        chmod +x "$SHORTCUT_PATH"
-        echo -e "${GREEN}[提示] 已自动注册全局命令: vpsbox${NC}"
+    else
+        { curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null && chmod +x "$SHORTCUT_PATH"; } &
     fi
 fi
 if [ -f /etc/os-release ]; then
@@ -84,16 +73,9 @@ HW_PROFILE="${CPU_CORES}C${RAM_GB}G"
 CURRENT_TZ=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')
 [ -z "$CURRENT_TZ" ] && CURRENT_TZ="UTC"
 
-# 并行检测 IPv4/IPv6（通过临时文件捕获输出，避免子 shell 变量丢失）
-SERVER_IPV4=""; SERVER_IPV6=""
-curl -s4 --connect-timeout 2 --max-time 3 ifconfig.me > /tmp/.vpsbox_ipv4 2>/dev/null &
-curl -s6 --connect-timeout 2 --max-time 3 ifconfig.me > /tmp/.vpsbox_ipv6 2>/dev/null &
-wait
-SERVER_IPV4=$(cat /tmp/.vpsbox_ipv4 2>/dev/null)
-SERVER_IPV6=$(cat /tmp/.vpsbox_ipv6 2>/dev/null)
-rm -f /tmp/.vpsbox_ipv4 /tmp/.vpsbox_ipv6
-[ -z "$SERVER_IPV4" ] && SERVER_IPV4=$(curl -s4 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
-[ -z "$SERVER_IPV6" ] && SERVER_IPV6=$(curl -s6 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+# 快速 IP 检测（1秒超时，避免启动卡顿）
+SERVER_IPV4=$(curl -s4 --connect-timeout 1 --max-time 1 ifconfig.me 2>/dev/null)
+SERVER_IPV6=$(curl -s6 --connect-timeout 1 --max-time 1 ifconfig.me 2>/dev/null)
 [ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
 [ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
 # 修复：纯 IPv6 时 SERVER_IP 应使用 IPv6 而非 "未分配" 字符串
