@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.5.1 — 版本检测改为后台异步，提示词立即显示
+# 版本: v1.5.2 — 主循环函数化，调用时 stdin 重定向，彻底解决管道卡死
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.5.1"
+VPSBOX_VERSION="v1.5.2"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -2868,17 +2868,12 @@ esac
 done
 }
 
+# 主循环包裹在函数中，调用时 stdin 重定向到 /dev/tty。
+# 此时 bash 已读完整个脚本，管道数据完全消费，不会丢内容或卡死。
+_vpsbox_main() {
 _VER_CHECKED=0
-_EXEC_TTY_DONE=0
 
 while true; do
-# 管道模式修复：exec 放在循环内部首行，且仅执行一次。
-# 此时 bash 已解析完整个 while 循环体，管道数据已全部消费完毕，
-# 不会再因缓冲区未读完而丢失脚本内容或卡死。
-if [ $_EXEC_TTY_DONE -eq 0 ] && [ ! -t 0 ]; then
-    exec < /dev/tty 2>/dev/null || true
-    _EXEC_TTY_DONE=1
-fi
 clear_screen; print_divider
 print_center "VPS Box  节点部署与服务器管家" "$PURPLE"
 print_divider
@@ -2982,3 +2977,8 @@ case $OPTION in
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
 done
+}
+
+# 管道模式：函数调用时 stdin 重定向到 /dev/tty
+# 终端模式（bash <()）：stdin 本来就是终端，重定向无副作用
+_vpsbox_main < /dev/tty 2>/dev/null || _vpsbox_main
