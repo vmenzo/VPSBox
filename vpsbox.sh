@@ -1,7 +1,7 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.2 — 版本检测乱码修复: echo 改 printf，v 前缀统一
+# 版本: v1.6.3 — 版本检测全面审查，注释/超时/前缀统一修正
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
 VPSBOX_VERSION="v1.6.3"
@@ -2835,7 +2835,7 @@ while true; do
 clear_screen; print_divider
 print_center "[ VPSBox 脚本管理 ]" "$CYAN"
 local local_ver="${VPSBOX_VERSION:-未知}"
-local remote_ver=$(curl -sL --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+local remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
 [ -n "$remote_ver" ] && echo -e "  ${CYAN}最新版本:${NC} ${GREEN}${remote_ver}${NC}" || echo -e "  ${YELLOW}无法获取远程版本${NC}"
 
@@ -2848,7 +2848,7 @@ case $ms_opt in
 1)
 if ! confirm_action "从 GitHub 拉取最新版覆盖当前脚本"; then continue; fi
 echo -e "\n${CYAN}>>> 正在下载...${NC}"
-curl -sL "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
+curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
 if [ -f /tmp/vpsbox_update.sh ] && grep -q "VPSBox" /tmp/vpsbox_update.sh; then
 mv /tmp/vpsbox_update.sh "$SHORTCUT_PATH"; chmod +x "$SHORTCUT_PATH"
 echo -e "\n${GREEN}[成功] 已更新！${NC}"
