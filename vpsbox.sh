@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3.5"
+VPSBOX_VERSION="v1.3.6"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -2848,7 +2848,7 @@ while true; do
 clear_screen; print_divider
 print_center "[ VPSBox 脚本管理 ]" "$CYAN"
 local local_ver="${VPSBOX_VERSION:-未知}"
-local remote_ver=$(curl -sL --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP 'VPSBOX_VERSION=\K[^"]+' | head -1)
+local remote_ver=$(curl -sL --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
 [ -n "$remote_ver" ] && echo -e "  ${CYAN}最新版本:${NC} ${GREEN}${remote_ver}${NC}" || echo -e "  ${YELLOW}无法获取远程版本${NC}"
 
@@ -2922,8 +2922,9 @@ print_divider
 echo ""
 if [ "$_VER_CHECKED" -eq 0 ]; then
     _VER_CHECKED=1
-    # 从远程脚本提取版本号（VPSBOX_VERSION="vX.Y"）
-    _rmt=$(curl -sL --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP 'VPSBOX_VERSION=\K[^"]+' | head -1)
+    # 从远程脚本提取版本号（VPSBOX_VERSION="vX.Y"），去掉 v 前缀
+    _rmt=$(curl -sL --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+    _rmt="${_rmt#v}"
     # 本地版本号（去掉 v 前缀用于比较）
     local_ver="${VPSBOX_VERSION#v}"
     if [ -n "$_rmt" ] && [ -n "$local_ver" ] && [ "$_rmt" != "$local_ver" ]; then
