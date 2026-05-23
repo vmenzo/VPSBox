@@ -1,14 +1,14 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.5.4 — 子 shell 隔离 exec，父 bash fd 0 不受影响，子函数自动继承
+# 版本: v1.6.0 — 极简方案: 函数调用一行重定向，无 exec 无子 shell
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.5.4"
+VPSBOX_VERSION="v1.6.0"
 
 # =====================================================================
-# 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
-# exec < /dev/tty 放在主菜单前，此时脚本已完全加载，不会打断管道
+# curl|bash 兼容: 脚本最后一行 _vpsbox_main </dev/tty
+# bash <() 兼容: stdin 本来就是终端，重定向无副作用
 # =====================================================================
 
 # 颜色变量必须最先定义，后续加载提示需要用到
@@ -2868,13 +2868,8 @@ esac
 done
 }
 
-# 管道模式下，子 shell 内 exec 重定向 stdin，不影响父 bash 的脚本读取。
-# 所有从主菜单调用的子函数自动继承 /dev/tty 作为 stdin。
+# 主循环函数，调用时 stdin 重定向到 /dev/tty
 _vpsbox_main() {
-(
-# 壳内重定向：仅子 shell 生效，父 bash fd 0 不受影响
-exec 0</dev/tty 2>/dev/null
-
 _VER_CHECKED=0
 
 while true; do
@@ -2981,7 +2976,7 @@ case $OPTION in
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
 done
-)
 }
 
-_vpsbox_main
+# 管道模式下函数调用时重定向 stdin 到终端，bash <() 模式下为无操作
+_vpsbox_main </dev/tty
