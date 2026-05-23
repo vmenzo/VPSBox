@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3.1"
+VPSBOX_VERSION="v1.3.2"
 
 # =====================================================================
 # 修复 curl|bash 管道模式：先定义主函数让 bash 读完全部脚本到内存
@@ -11,12 +11,16 @@ VPSBOX_VERSION="v1.3.1"
 # =====================================================================
 _main() {
 
+# 颜色变量必须最先定义，后续加载提示需要用到
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
+
+# 立即输出加载提示，防止 curl|bash 管道模式下长时间静默让用户以为卡死
+echo -e "\n${GREEN}[VPSBox v${VPSBOX_VERSION#v}]${NC} 正在初始化..."
 BACKUP_DIR="/etc/vpsbox_backups"
 CUSTOM_CONF="/etc/sysctl.d/99-vpsbox-tcp.conf"
 SHORTCUT_PATH="/usr/local/bin/vpsbox"
@@ -71,8 +75,14 @@ RAM_GB=$(( (RAM_MB + 512) / 1024 ))
 HW_PROFILE="${CPU_CORES}C${RAM_GB}G"
 CURRENT_TZ=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')
 [ -z "$CURRENT_TZ" ] && CURRENT_TZ="UTC"
-SERVER_IPV4=$(curl -s4 --max-time 3 ifconfig.me 2>/dev/null || curl -s4 --max-time 3 ip.sb 2>/dev/null)
-SERVER_IPV6=$(curl -s6 --max-time 3 ifconfig.me 2>/dev/null || curl -s6 --max-time 3 ip.sb 2>/dev/null)
+
+# 并行检测 IPv4/IPv6（缩短超时防止启动卡顿）
+SERVER_IPV4=""; SERVER_IPV6=""
+{ SERVER_IPV4=$(curl -s4 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null); } &
+{ SERVER_IPV6=$(curl -s6 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null); } &
+wait
+[ -z "$SERVER_IPV4" ] && SERVER_IPV4=$(curl -s4 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+[ -z "$SERVER_IPV6" ] && SERVER_IPV6=$(curl -s6 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
 [ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
 [ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
 # 修复：纯 IPv6 时 SERVER_IP 应使用 IPv6 而非 "未分配" 字符串
