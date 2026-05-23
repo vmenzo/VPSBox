@@ -75,7 +75,14 @@ SERVER_IPV4=$(curl -s4 --max-time 3 ifconfig.me 2>/dev/null || curl -s4 --max-ti
 SERVER_IPV6=$(curl -s6 --max-time 3 ifconfig.me 2>/dev/null || curl -s6 --max-time 3 ip.sb 2>/dev/null)
 [ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
 [ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
-SERVER_IP="$SERVER_IPV4"
+# 修复：纯 IPv6 时 SERVER_IP 应使用 IPv6 而非 "未分配" 字符串
+if [ "$SERVER_IPV4" != "未分配" ]; then
+    SERVER_IP="$SERVER_IPV4"
+elif [ "$SERVER_IPV6" != "未分配" ]; then
+    SERVER_IP="[${SERVER_IPV6}]"
+else
+    SERVER_IP="未分配"
+fi
 
 get_term_width() {
 local cols=$(tput cols 2>/dev/null || echo 80)
@@ -855,8 +862,13 @@ _bbr_delete_kernel() {
 
 _bbr_remove_all() {
   echo -e "\n${CYAN}>>> 清除加速与优化配置...${NC}"
-  rm -f /etc/sysctl.d/99-vpsbox-bbr.conf
-  cat /dev/null > /etc/sysctl.conf
+  # 只删除 vpsbox 写入的参数，保留系统原有配置
+  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
+  rm -f "$conf"
+  # 仅从 /etc/sysctl.conf 中删除 vpsbox 相关的参数行（不破坏其他内容）
+  sed -i '/net\.core\.default_qdisc/d; /net\.ipv4\.tcp_congestion_control/d; /net\.ipv4\.tcp_ecn/d' /etc/sysctl.conf 2>/dev/null
+  sed -i '/net\.ipv6\.conf\.all\.disable_ipv6/d; /net\.ipv6\.conf\.default\.disable_ipv6/d' /etc/sysctl.conf 2>/dev/null
+  sed -i '/net\.ipv4\.tcp_syncookies/d; /net\.ipv4\.tcp_max_syn_backlog/d; /net\.ipv4\.tcp_synack_retries/d' /etc/sysctl.conf 2>/dev/null
   sysctl --system >/dev/null 2>&1
   sed -i '/DefaultLimitNOFILE/d; /DefaultLimitNPROC/d' /etc/systemd/system.conf 2>/dev/null
   sed -i '/soft   nofile/d; /hard   nofile/d' /etc/security/limits.conf 2>/dev/null
@@ -1715,12 +1727,12 @@ read -r -p "> 请输入编号 (0取消): " n_res_opt
 n_res_opt="${n_res_opt// /}"
 if [ "$n_res_opt" == "0" ]; then continue; fi
 if [[ "$n_res_opt" =~ ^[0-9]+$ ]] && [ "$n_res_opt" -ge 1 ] && [ "$n_res_opt" -le "${#n_backups[@]}" ]; then
-if ! confirm_action "还原此备份 (当前配置将被覆盖，且服务会重启)" "n"; then continue; fi
+if ! confirm_action "还原此备份 (当前配置将被覆盖，且服务会在后台重启)" "n"; then continue; fi
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
-[ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" /usr/local/etc/xray/config.json && _svc_restart xray
-[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && _svc_reload sing-box
+[ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" /usr/local/etc/xray/config.json && ( sleep 1; _svc_restart xray >/dev/null 2>&1 ) &
+[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && ( sleep 1; _svc_reload sing-box >/dev/null 2>&1 ) &
 [ -f "$sel_bk/vpsbox_nodes.txt" ] && cp "$sel_bk/vpsbox_nodes.txt" "$NODE_RECORD_FILE"
-echo -e "\n${GREEN}[成功] 节点配置已成功还原！服务已尝试重启。${NC}"; pause_for_enter
+echo -e "\n${GREEN}[成功] 节点配置已成功还原！服务将在后台重启。${NC}"; pause_for_enter
 else
 echo -e "${RED}[错误] 输入无效编号！${NC}"; sleep 1
 fi
@@ -1763,8 +1775,9 @@ if [ -f "/usr/local/etc/xray/config.json" ]; then
 if jq -e ".inbounds[] | select(.port == $del_port)" /usr/local/etc/xray/config.json > /dev/null 2>&1; then
 jq "del(.inbounds[] | select(.port == $del_port))" /usr/local/etc/xray/config.json > /tmp/xray_tmp.json
 if [ -s /tmp/xray_tmp.json ]; then
-mv /tmp/xray_tmp.json /usr/local/etc/xray/config.json; _svc_restart xray
+mv /tmp/xray_tmp.json /usr/local/etc/xray/config.json
 echo -e "${GREEN}[成功] 已成功移除 Xray 中占用端口 $del_port 的节点配置！${NC}"
+( sleep 1; _svc_restart xray >/dev/null 2>&1 ) &
 else
 rm -f /tmp/xray_tmp.json; echo -e "${RED}[错误] Xray 节点删除失败，配置可能受损！${NC}"
 fi
@@ -1774,8 +1787,9 @@ if [ -f "/etc/sing-box/config.json" ]; then
 if jq -e ".inbounds[] | select(.listen_port == $del_port)" /etc/sing-box/config.json > /dev/null 2>&1; then
 jq "del(.inbounds[] | select(.listen_port == $del_port))" /etc/sing-box/config.json > /tmp/sb_tmp.json
 if [ -s /tmp/sb_tmp.json ]; then
-mv /tmp/sb_tmp.json /etc/sing-box/config.json; _svc_reload sing-box
+mv /tmp/sb_tmp.json /etc/sing-box/config.json
 echo -e "${GREEN}[成功] 已成功移除 Sing-box 中占用端口 $del_port 的节点配置！${NC}"
+( sleep 1; _svc_reload sing-box >/dev/null 2>&1 ) &
 else
 rm -f /tmp/sb_tmp.json; echo -e "${RED}[错误] Sing-box 节点删除失败，配置可能受损！${NC}"
 fi
@@ -2892,7 +2906,7 @@ case $OPTION in
  7) manage_swap ;;
  8) optimize_dns ;;
  9) change_ssh_port ;;
-10) manage_sshkey ;;
+10) manage_ssh_security ;;
 11) disk_manager ;;
 12) crontab_manager ;;
 13) tools_manager ;;
