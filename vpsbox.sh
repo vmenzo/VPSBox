@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3.6"
+VPSBOX_VERSION="v1.3.7"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -2907,9 +2907,12 @@ echo -e "  ${GREEN}14.${NC} TCP 智能调优引擎    ${GREEN}15.${NC} 调优参
 echo -e "  ${GREEN}16.${NC} BBR 拥塞控制管理"
 
 echo -e "\n  ${CYAN}▶ 节点部署${NC}"
-echo -e "  ${GREEN}17.${NC} IP 质量与流媒体检测    ${GREEN}18.${NC} 部署 VLESS-Reality"
-echo -e "  ${GREEN}19.${NC} 部署 VLESS-WS-TLS       ${GREEN}20.${NC} 部署 AnyTLS"
-echo -e "  ${GREEN}21.${NC} 部署 Hysteria2          ${GREEN}22.${NC} 查看已部署节点"
+echo -e "  ${GREEN}17.${NC} IP 质量与流媒体检测"
+echo -e "  ${GREEN}18.${NC} 部署 VLESS-Reality"
+echo -e "  ${GREEN}19.${NC} 部署 VLESS-WS-TLS"
+echo -e "  ${GREEN}20.${NC} 部署 AnyTLS"
+echo -e "  ${GREEN}21.${NC} 部署 Hysteria2"
+echo -e "  ${GREEN}22.${NC} 查看已部署节点"
 echo -e "  ${GREEN}23.${NC} 删除指定节点"
 
 echo -e "\n  ${CYAN}▶ 工具与安全${NC}"
