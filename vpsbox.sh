@@ -1,9 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 修复版本: SIGHUP 防御与证书机制重构版
+# 版本: v1.5.0 — 修复 curl|bash 管道卡死 (exec 移入 while 循环内部)
+# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.4.0"
+VPSBOX_VERSION="v1.5.0"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -2868,13 +2869,16 @@ done
 }
 
 _VER_CHECKED=0
-
-# 管道模式修复：exec 放在主菜单前最后一步，此时脚本已完全从管道加载完毕
-if [ ! -t 0 ]; then
-    exec < /dev/tty 2>/dev/null || true
-fi
+_EXEC_TTY_DONE=0
 
 while true; do
+# 管道模式修复：exec 放在循环内部首行，且仅执行一次。
+# 此时 bash 已解析完整个 while 循环体，管道数据已全部消费完毕，
+# 不会再因缓冲区未读完而丢失脚本内容或卡死。
+if [ $_EXEC_TTY_DONE -eq 0 ] && [ ! -t 0 ]; then
+    exec < /dev/tty 2>/dev/null || true
+    _EXEC_TTY_DONE=1
+fi
 clear_screen; print_divider
 print_center "VPS Box  节点部署与服务器管家" "$PURPLE"
 print_divider
@@ -2937,11 +2941,13 @@ fi
 echo ""
 read -r -p "> 请输入选择 [0-27,00]: " OPTION
 OPTION="${OPTION// /}"
-# 修复：curl|bash 管道关闭时 read 收到 EOF 导致空输入，优雅退出而非死循环弹错误
+# 修复：curl|bash 管道关闭或空输入时继续循环而非退出
 if [ -z "$OPTION" ]; then
-    echo -e "\n${RED}[提示] 检测到输入流异常（可能是管道模式运行），请使用 ${GREEN}vpsbox${NC} 命令直接启动。${NC}"
-    echo -e "${YELLOW}正在安全退出...${NC}\n"
-    exit 1
+    if [ ! -t 0 ]; then
+        echo -e "\n${RED}[提示] 检测到输入流异常，请使用 ${GREEN}bash <(curl -sL ${SCRIPT_URL})${NC} 方式运行。${NC}"
+        exit 1
+    fi
+    continue
 fi
 case $OPTION in
  1) system_overview ;;
