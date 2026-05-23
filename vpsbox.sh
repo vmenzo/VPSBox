@@ -1,14 +1,14 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.0 — 极简方案: 函数调用一行重定向，无 exec 无子 shell
+# 版本: v1.6.1 — 仅管道模式重定向，终端模式保持默认 stdin
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.0"
+VPSBOX_VERSION="v1.6.1"
 
 # =====================================================================
-# curl|bash 兼容: 脚本最后一行 _vpsbox_main </dev/tty
-# bash <() 兼容: stdin 本来就是终端，重定向无副作用
+# curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
+# 终端模式（本地运行/vpsbox/bash <()）: 保持默认 stdin
 # =====================================================================
 
 # 颜色变量必须最先定义，后续加载提示需要用到
@@ -2978,5 +2978,9 @@ esac
 done
 }
 
-# 管道模式下函数调用时重定向 stdin 到终端，bash <() 模式下为无操作
-_vpsbox_main </dev/tty
+# 仅管道模式重定向 stdin，终端模式（本地/vpsbox 命令/bash <()）保持原样
+if [ ! -t 0 ]; then
+    _vpsbox_main </dev/tty
+else
+    _vpsbox_main
+fi
