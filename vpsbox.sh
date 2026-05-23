@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3.9"
+VPSBOX_VERSION="v1.4.0"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -73,19 +73,19 @@ HW_PROFILE="${CPU_CORES}C${RAM_GB}G"
 CURRENT_TZ=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')
 [ -z "$CURRENT_TZ" ] && CURRENT_TZ="UTC"
 
-# 快速 IP 检测（1秒超时，避免启动卡顿）
-SERVER_IPV4=$(curl -s4 --connect-timeout 1 --max-time 1 ifconfig.me 2>/dev/null)
-SERVER_IPV6=$(curl -s6 --connect-timeout 1 --max-time 1 ifconfig.me 2>/dev/null)
-[ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
-[ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
-# 修复：纯 IPv6 时 SERVER_IP 应使用 IPv6 而非 "未分配" 字符串
-if [ "$SERVER_IPV4" != "未分配" ]; then
-    SERVER_IP="$SERVER_IPV4"
-elif [ "$SERVER_IPV6" != "未分配" ]; then
-    SERVER_IP="[${SERVER_IPV6}]"
-else
-    SERVER_IP="未分配"
-fi
+# IP 懒加载：启动不检测，首次使用时自动获取（避免无 IPv6 机器卡死）
+SERVER_IPV4=""; SERVER_IPV6=""; SERVER_IP=""; _IP_DONE=0
+_ensure_ip() {
+    [ "$_IP_DONE" -eq 1 ] && return
+    _IP_DONE=1
+    SERVER_IPV4=$(curl -s4 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null || curl -s4 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+    [ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
+    SERVER_IPV6=$(curl -s6 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null || curl -s6 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+    [ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
+    if [ "$SERVER_IPV4" != "未分配" ]; then SERVER_IP="$SERVER_IPV4"
+    elif [ "$SERVER_IPV6" != "未分配" ]; then SERVER_IP="[${SERVER_IPV6}]"
+    else SERVER_IP="未分配"; fi
+}
 
 get_term_width() {
 local cols=$(tput cols 2>/dev/null || echo 80)
@@ -1125,6 +1125,7 @@ done
 system_overview() {
 clear_screen; print_divider
 print_center "[ 系统信息与资源概览 ]" "$CYAN"
+_ensure_ip
 
 local os_info cpu_model cpu_arch cpu_cores cpu_freq virt_type
 os_info=$(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2)
@@ -1900,6 +1901,7 @@ output_node_result() {
 install_reality_node() {
 clear_screen; print_divider
 print_center "[ 部署 VLESS-Reality 节点 ]" "$CYAN"
+_ensure_ip
 echo -e "${YELLOW}>>> 小白科普：VLESS-Reality 是一种先进的伪装技术。不需要您购买域名，直接“借用”大厂（如苹果、微软）的域名进行伪装，安全性极高，非常适合防封锁。${NC}\n"
 
 while true; do
@@ -1961,6 +1963,7 @@ pause_for_enter
 install_anytls_node() {
 clear_screen; print_divider
 print_center "[ 部署 AnyTLS 节点 ]" "$CYAN"
+_ensure_ip
 echo -e "${YELLOW}>>> 小白科普：AnyTLS 是 sing-box 专属协议。使用自有域名 + Let's Encrypt 真证书，密码认证。${NC}\n"
 
 while true; do
@@ -2206,6 +2209,7 @@ pause_for_enter
 install_hy2_node() {
 clear_screen; print_divider
 print_center "[ 部署 Hysteria2 节点 ]" "$CYAN"
+_ensure_ip
 echo -e "${YELLOW}>>> 小白科普：Hysteria2 是一种基于 UDP 协议的暴力加速代理方案。如果您的服务器到国内的线路非常差（比如晚高峰卡顿），这个协议能无视拥塞强行拉满网速，体验飞跃！${NC}\n"
 
 while true; do
