@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.5.0 — 修复 curl|bash 管道卡死 (exec 移入 while 循环内部)
+# 版本: v1.5.1 — 版本检测改为后台异步，提示词立即显示
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.5.0"
+VPSBOX_VERSION="v1.5.1"
 
 # =====================================================================
 # 修复 curl|bash: 所有代码在顶层顺序执行，bash 自然读完管道全部内容
@@ -2910,31 +2910,31 @@ echo -e "  ${GREEN}00.${NC} 脚本管理（更新/卸载）"
 echo -e "\n  ${GREEN} 0.${NC} 退出"
 print_divider
 echo ""
+# 版本检测：首次运行时后台异步，不阻塞菜单显示
 if [ "$_VER_CHECKED" -eq 0 ]; then
     _VER_CHECKED=1
-    # 从远程脚本提取版本号（VPSBOX_VERSION="vX.Y"），去掉 v 前缀
-    _rmt=$(curl -sL --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
-    _rmt="${_rmt#v}"
-    # 本地版本号（去掉 v 前缀用于比较）
-    local_ver="${VPSBOX_VERSION#v}"
-    if [ -n "$_rmt" ] && [ -n "$local_ver" ] && [ "$_rmt" != "$local_ver" ]; then
-        # semver 简单比较：按 . 分割后逐段比较
-        IFS='.' read -ra rmt_parts <<< "$_rmt"
-        IFS='.' read -ra loc_parts <<< "$local_ver"
-        newer=0
-        for i in 0 1 2; do
-            r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
-            if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
-            if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
-        done
-        if [ "$newer" -eq 1 ]; then
-            echo -e "   ${GREEN}[新版本可用] ${_rmt} (当前: ${local_ver}) → 请选择 00 更新${NC}"
-        else
-            echo ""
-        fi
-    else
-        echo ""
-    fi
+    { _rmt=$(curl -sL --connect-timeout 2 --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+      _rmt="${_rmt#v}"
+      local_ver="${VPSBOX_VERSION#v}"
+      if [ -n "$_rmt" ] && [ -n "$local_ver" ] && [ "$_rmt" != "$local_ver" ]; then
+          IFS='.' read -ra rmt_parts <<< "$_rmt"
+          IFS='.' read -ra loc_parts <<< "$local_ver"
+          newer=0
+          for i in 0 1 2; do
+              r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
+              if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
+              if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
+          done
+          if [ "$newer" -eq 1 ]; then
+              echo "   ${GREEN}[新版本可用] ${_rmt} (当前: ${local_ver}) → 请选择 00 更新${NC}" > /tmp/vpsbox_version_msg
+          fi
+      fi
+    } &
+fi
+# 显示缓存版本消息（上次后台检测的结果）
+if [ -f /tmp/vpsbox_version_msg ]; then
+    cat /tmp/vpsbox_version_msg
+    rm -f /tmp/vpsbox_version_msg
 else
     echo ""
 fi
