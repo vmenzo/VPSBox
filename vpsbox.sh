@@ -3,7 +3,7 @@
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 修复版本: SIGHUP 防御与证书机制重构版
 # =====================================================================
-VPSBOX_VERSION="v1.3"
+VPSBOX_VERSION="v1.3.1"
 
 # =====================================================================
 # 修复 curl|bash 管道模式：先定义主函数让 bash 读完全部脚本到内存
@@ -2553,17 +2553,30 @@ case $sk_opt in
   ssh-keygen -t ed25519 -C "vpsbox-key" -f "${HOME}/.ssh/vpsbox_key" -N "" -q
   cat "${HOME}/.ssh/vpsbox_key.pub" >> "${HOME}/.ssh/authorized_keys"
   chmod 600 "${HOME}/.ssh/authorized_keys"
-  sed -i -e 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' \
-         -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
-         -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' \
-         -e 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d/*
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo ""
   echo -e "${YELLOW}>>> 私钥内容如下（请立即复制保存，命名为 vpsbox_key）:${NC}"
   echo "--------------------------------"
   cat "${HOME}/.ssh/vpsbox_key"
   echo "--------------------------------"
+  echo ""
+  echo -e "${RED}⚠ 下一步将关闭密码登录并仅允许密钥登录！${NC}"
+  echo -e "${RED}⚠ 如果私钥未保存或丢失，将无法登录服务器！${NC}"
+  if ! confirm_action "关闭密码登录并启用密钥登录" "n"; then
+    echo -e "${YELLOW}已跳过 SSH 配置修改，密钥文件已生成可稍后手动配置。${NC}"
+    pause_for_enter; continue
+  fi
+  sed -i -e 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' \
+         -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
+         -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' \
+         -e 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
+  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
+  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  echo ""
   echo -e "${GREEN}[成功] 密钥已生成，密码登录已关闭。请用私钥文件登录。${NC}"
   pause_for_enter ;;
 2)
@@ -2579,7 +2592,12 @@ case $sk_opt in
   fi
   echo "$_pubkey" >> "${HOME}/.ssh/authorized_keys"
   sed -i -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d/*
+  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 公钥已导入并启用密钥登录。${NC}"; pause_for_enter ;;
 3)
@@ -2595,9 +2613,14 @@ case $sk_opt in
   touch "${HOME}/.ssh/authorized_keys"; chmod 600 "${HOME}/.ssh/authorized_keys"
   echo "$_ghkeys" >> "${HOME}/.ssh/authorized_keys"
   sed -i -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d/*
+  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
-  echo -e "${GREEN}[成功] 已从 GitHub(${ _ghuser}) 导入公钥。${NC}"; pause_for_enter ;;
+  echo -e "${GREEN}[成功] 已从 GitHub(${_ghuser}) 导入公钥。${NC}"; pause_for_enter ;;
 4)
   echo ""
   read -r -p "> 请输入公钥 URL: " _kurl
@@ -2622,14 +2645,24 @@ case $sk_opt in
 6)
   sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
          -e 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d/*
+  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 密码登录已开启。${NC}"; pause_for_enter ;;
 7)
   sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
          -e 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' \
          -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  rm -rf /etc/ssh/sshd_config.d/*
+  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 密码登录已关闭，仅允许密钥登录。${NC}"; pause_for_enter ;;
 0) break ;;
@@ -2906,7 +2939,7 @@ case $OPTION in
  7) manage_swap ;;
  8) optimize_dns ;;
  9) change_ssh_port ;;
-10) manage_ssh_security ;;
+10) manage_sshkey ;;
 11) disk_manager ;;
 12) crontab_manager ;;
 13) tools_manager ;;
