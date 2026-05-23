@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.1 — 仅管道模式重定向，终端模式保持默认 stdin
+# 版本: v1.6.2 — 版本检测乱码修复: echo 改 printf，v 前缀统一
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.1"
+VPSBOX_VERSION="v1.6.2"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -2920,7 +2920,7 @@ if [ "$_VER_CHECKED" -eq 0 ]; then
               if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
           done
           if [ "$newer" -eq 1 ]; then
-              echo "   ${GREEN}[新版本可用] ${_rmt} (当前: ${local_ver}) → 请选择 00 更新${NC}" > /tmp/vpsbox_version_msg
+              printf "   \033[0;32m[新版本可用] v%s (当前: v%s) → 请选择 00 更新\033[0m\n" "$_rmt" "$local_ver" > /tmp/vpsbox_version_msg
           fi
       fi
     } &
