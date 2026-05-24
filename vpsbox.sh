@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.0 — 启动时检测新版本并提示
+# 版本: v1.7.1 — 菜单编号审计收尾与脚本管理顺延至 22
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.0"
+VPSBOX_VERSION="v1.7.1"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3036,7 +3036,7 @@ menu_logo() {
   print_center "轻量级节点管理与服务器优化工具  ·  ${VPSBOX_VERSION}" "$CYAN"
   print_center "快捷命令: vpsbox" "$YELLOW"
   if [ "${UPDATE_AVAILABLE:-0}" -eq 1 ]; then
-    print_center "发现新版本: ${REMOTE_VERSION}  ·  请选择 23 脚本管理手动更新" "$GREEN"
+    print_center "发现新版本: ${REMOTE_VERSION}  ·  请选择 22 脚本管理手动更新" "$GREEN"
   fi
   print_divider
   echo ""
@@ -3134,13 +3134,13 @@ menu_pair 17 "UFW 防火墙" 18 "节点管理"
 echo ""
 echo -e "  ${CYAN}更多功能${NC}"
 menu_pair 19 "磁盘分区" 20 "定时任务"
-menu_pair 21 "基础工具箱" 23 "脚本管理"
+menu_pair 21 "基础工具箱" 22 "脚本管理"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-23]: "
+_read_menu_choice OPTION "> 请选择 [0-22]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -3164,7 +3164,7 @@ case $OPTION in
 19) disk_manager ;;
 20) crontab_manager ;;
 21) tools_manager ;;
-23) manage_script ;;
+22) manage_script ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
