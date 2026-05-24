@@ -203,6 +203,16 @@ _sshd_config_test() {
   else return 0; fi
 }
 
+_restart_ssh_service_safely() {
+  local action_desc="$1"
+  if ! _sshd_config_test; then
+    echo -e "${RED}[错误] SSH 配置校验失败，已取消重启。${NC}"
+    return 1
+  fi
+  [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，SSH 服务将在后台短暂重启。${NC}"
+  ( sleep 1; _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1 ) &
+}
+
 _set_sshd_option() {
   local key="$1" value="$2" file="/etc/ssh/sshd_config" backup
   [ -f "$file" ] || { echo -e "${RED}[错误] 未找到 $file${NC}"; return 1; }
@@ -470,12 +480,12 @@ pause_for_enter ;;
 3)
 if ! confirm_action "禁用密码登录 (⚠️ 请确保您已成功配置密钥)" "n"; then continue; fi
 _set_sshd_option PasswordAuthentication no || { pause_for_enter; continue; }
-_svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null || { echo -e "\n${RED}[错误] SSH 服务重启失败，设置可能未生效。${NC}"; pause_for_enter; continue; }
+_restart_ssh_service_safely "已应用禁用密码登录设置" || { pause_for_enter; continue; }
 echo -e "\n${GREEN}[成功] 密码登录已成功禁用！现在只能通过密钥连接服务器。${NC}"; pause_for_enter ;;
 4)
 if ! confirm_action "开启密码登录"; then continue; fi
 _set_sshd_option PasswordAuthentication yes || { pause_for_enter; continue; }
-_svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null || { echo -e "\n${RED}[错误] SSH 服务重启失败。${NC}"; pause_for_enter; continue; }
+_restart_ssh_service_safely "已应用开启密码登录设置" || { pause_for_enter; continue; }
 echo -e "\n${GREEN}[成功] 密码登录已成功开启！${NC}"; pause_for_enter ;;
 0) return ;;
 *) echo -e "\n${RED}输入无效！${NC}"; sleep 1 ;;
@@ -501,10 +511,10 @@ while true; do
 done
 if ! confirm_action "将 SSH 端口改为 ${new_port}"; then return; fi
 _set_sshd_option Port "$new_port" || { pause_for_enter; return; }
-_svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
-if [ $? -eq 0 ]; then
+if _restart_ssh_service_safely "SSH 端口已更新为 ${new_port}"; then
   echo -e "\n${GREEN}[成功] SSH 端口已改为 ${new_port}！${NC}"
   echo -e "  ${RED}[重要] 请立即在云服务商控制台放行端口 ${new_port}，否则下次无法连接！${NC}"
+  echo -e "  ${YELLOW}[提示] 请使用新端口重新连接验证。${NC}"
 else
   echo -e "\n${RED}[错误] SSH 服务重启失败，端口可能未生效，请手动检查。${NC}"
 fi
@@ -2739,7 +2749,7 @@ case $sk_opt in
   _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
   _set_sshd_option ChallengeResponseAuthentication no || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用仅密钥登录设置" || { pause_for_enter; continue; }
   echo ""
   echo -e "${GREEN}[成功] 密钥已生成，密码登录已关闭。请用私钥文件登录。${NC}"
   pause_for_enter ;;
@@ -2757,7 +2767,7 @@ case $sk_opt in
   echo "$_pubkey" >> "${HOME}/.ssh/authorized_keys"
   _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用公钥登录设置" || { pause_for_enter; continue; }
   echo -e "${GREEN}[成功] 公钥已导入并启用密钥登录。${NC}"; pause_for_enter ;;
 3)
   echo ""
@@ -2776,7 +2786,7 @@ case $sk_opt in
   echo "$_ghkeys" >> "${HOME}/.ssh/authorized_keys"
   _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用 GitHub 公钥登录设置" || { pause_for_enter; continue; }
   echo -e "${GREEN}[成功] 已从 GitHub(${_ghuser}) 导入公钥。${NC}"; pause_for_enter ;;
 4)
   echo ""
@@ -2795,7 +2805,7 @@ case $sk_opt in
   echo "$_remote_keys" >> "${HOME}/.ssh/authorized_keys"
   _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用 URL 公钥登录设置" || { pause_for_enter; continue; }
   echo -e "${GREEN}[成功] 已从 URL 导入公钥。${NC}"; pause_for_enter ;;
 5)
   echo ""
@@ -2807,14 +2817,14 @@ case $sk_opt in
   _set_sshd_option PasswordAuthentication yes || { pause_for_enter; continue; }
   _set_sshd_option PermitRootLogin yes || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用密码登录开启设置" || { pause_for_enter; continue; }
   echo -e "${GREEN}[成功] 密码登录已开启。${NC}"; pause_for_enter ;;
 7)
   _set_sshd_option PasswordAuthentication no || { pause_for_enter; continue; }
   _set_sshd_option PermitRootLogin prohibit-password || { pause_for_enter; continue; }
   _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
   _harden_sshd_dropins
-  _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
+  _restart_ssh_service_safely "已应用仅密钥登录设置" || { pause_for_enter; continue; }
   echo -e "${GREEN}[成功] 密码登录已关闭，仅允许密钥登录。${NC}"; pause_for_enter ;;
 0) break ;;
 *) echo -e "${RED}[提示] 编号错误。${NC}"; sleep 1 ;;
@@ -2966,7 +2976,7 @@ case $ct_opt in
   [ $_exec_no -lt 0 ] || [ $_exec_no -ge ${#_exec_lines[@]} ] && echo -e "${RED}编号超出范围！${NC}" && sleep 2 && continue
   local _exec_cmd=$(echo "${_exec_lines[$_exec_no]}" | awk '{$1=$2=$3=$4=$5=""; print $0}' | sed 's/^[[:space:]]*//')
   echo -e "${CYAN}>>> 正在执行: $_exec_cmd${NC}"
-  eval "$_exec_cmd"; pause_for_enter ;;
+  bash -lc "$_exec_cmd"; pause_for_enter ;;
 0) break ;;
 *) echo -e "${RED}[提示] 编号错误。${NC}"; sleep 1 ;;
 esac
@@ -2980,7 +2990,27 @@ print_center "[ VPSBox 脚本管理 ]" "$CYAN"
 local local_ver="${VPSBOX_VERSION:-未知}"
 local remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
 echo -e "  ${CYAN}本地版本:${NC} ${GREEN}${local_ver}${NC}"
-[ -n "$remote_ver" ] && echo -e "  ${CYAN}最新版本:${NC} ${GREEN}${remote_ver}${NC}" || echo -e "  ${YELLOW}无法获取远程版本${NC}"
+if [ -n "$remote_ver" ]; then
+  local _local_cmp _remote_cmp _remote_newer=0 _local_newer=0 _i _r _l
+  _local_cmp="${local_ver#v}"
+  _remote_cmp="${remote_ver#v}"
+  if [ "$_remote_cmp" != "$_local_cmp" ]; then
+    IFS='.' read -ra _remote_parts <<< "$_remote_cmp"
+    IFS='.' read -ra _local_parts <<< "$_local_cmp"
+    for _i in 0 1 2; do
+      _r=${_remote_parts[$_i]:-0}; _l=${_local_parts[$_i]:-0}
+      if [ "$_r" -gt "$_l" ] 2>/dev/null; then _remote_newer=1; break; fi
+      if [ "$_r" -lt "$_l" ] 2>/dev/null; then _local_newer=1; break; fi
+    done
+  fi
+  if [ "$_local_newer" -eq 1 ]; then
+    echo -e "  ${CYAN}远端版本:${NC} ${YELLOW}${remote_ver}${NC}  ${GREEN}(本地较新)${NC}"
+  else
+    echo -e "  ${CYAN}最新版本:${NC} ${GREEN}${remote_ver}${NC}"
+  fi
+else
+  echo -e "  ${YELLOW}无法获取远程版本${NC}"
+fi
 
 echo -e "  ${GREEN}1.${NC} 从 GitHub 更新到最新版本"
 echo -e "  ${RED}2.${NC} 彻底卸载 VPSBox 及所有残留"
