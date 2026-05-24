@@ -1534,6 +1534,27 @@ pause_for_enter
 }
 
 apply_tuning() {
+while true; do
+clear_screen; print_divider
+print_center "[ TCP 调优 ]" "$CYAN"
+echo -e "  ${GREEN}1.${NC} 智能 TCP 调优"
+echo -e "  ${GREEN}2.${NC} 调优备份/还原"
+echo -e "  ${GREEN}0.${NC} 返回主菜单"
+echo ""
+read -r -p "> 请选择 [0-2]: " tuning_opt
+tuning_opt="${tuning_opt// /}"
+case $tuning_opt in
+1)
+run_tcp_tuning ;;
+2)
+manage_backup ;;
+0) return ;;
+*) echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
+esac
+done
+}
+
+run_tcp_tuning() {
 clear_screen; print_divider
 print_center "[ VPS Box 自研动态 TCP 智能调优引擎 ]" "$CYAN"
 local local_bw server_bw latency ramp_up bbr_ver qdisc
@@ -3015,7 +3036,7 @@ menu_logo() {
   print_center "轻量级节点管理与服务器优化工具  ·  ${VPSBOX_VERSION}" "$CYAN"
   print_center "快捷命令: vpsbox" "$YELLOW"
   if [ "${UPDATE_AVAILABLE:-0}" -eq 1 ]; then
-    print_center "发现新版本: ${REMOTE_VERSION}  ·  请选择 18 脚本管理手动更新" "$GREEN"
+    print_center "发现新版本: ${REMOTE_VERSION}  ·  请选择 23 脚本管理手动更新" "$GREEN"
   fi
   print_divider
   echo ""
@@ -3108,13 +3129,12 @@ echo -e "  ${CYAN}网络与安全${NC}"
 menu_pair 11 "TCP 调优" 12 "BBR 管理"
 menu_pair 13 "流媒体检测" 14 "Docker"
 menu_pair 15 "Fail2Ban" 16 "WARP 解锁"
-menu_pair 17 "UFW 防火墙" 18 "脚本管理"
+menu_pair 17 "UFW 防火墙" 18 "节点管理"
 
 echo ""
 echo -e "  ${CYAN}更多功能${NC}"
-menu_pair 19 "节点管理" 20 "磁盘分区"
-menu_pair 21 "定时任务" 22 "基础工具箱"
-menu_single 23 "调优备份/还原"
+menu_pair 19 "磁盘分区" 20 "定时任务"
+menu_pair 21 "基础工具箱" 23 "脚本管理"
 
 echo ""
 print_divider
@@ -3140,12 +3160,11 @@ case $OPTION in
 15) fail2ban_install ;;
 16) install_warp ;;
 17) manage_ufw ;;
-18) manage_script ;;
-19) menu_nodes ;;
-20) disk_manager ;;
-21) crontab_manager ;;
-22) tools_manager ;;
-23) manage_backup ;;
+18) menu_nodes ;;
+19) disk_manager ;;
+20) crontab_manager ;;
+21) tools_manager ;;
+23) manage_script ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
