@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.5 — 修复 SSH/DNS/Fail2Ban/服务管理安全问题
+# 版本: v1.6.6 — 继续加固远程脚本、Swap 与 SSH 密钥管理
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.5"
+VPSBOX_VERSION="v1.6.6"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -242,6 +242,34 @@ _pkg_remove() {
   elif command -v pacman &>/dev/null; then pacman -Rns --noconfirm "$@"
   elif command -v zypper &>/dev/null; then zypper remove -y "$@"
   else echo -e "${RED}[错误] 未识别的包管理器！${NC}"; fi
+}
+
+_run_remote_bash() {
+  local url="$1" tmp rc
+  shift
+  tmp=$(mktemp) || return 1
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  bash "$tmp" "$@"
+  rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+_harden_sshd_dropins() {
+  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
+    local f
+    for f in /etc/ssh/sshd_config.d/*.conf; do
+      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
+    done
+  fi
+}
+
+_valid_ssh_key_lines() {
+  grep -Ev '^[[:space:]]*$' | grep -Eqv '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+) ' && return 1
+  return 0
 }
 
 install_dependencies() {
@@ -577,7 +605,7 @@ case $swap_opt in
   pause_for_enter ;;
 2)
   if ! confirm_action "关闭并删除现有 Swap" "n"; then continue; fi
-  swapoff -a 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab
+  swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab
   echo -e "\n${GREEN}[成功] Swap 已清除！${NC}"; pause_for_enter ;;
 0) return ;;
 *) echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
@@ -1353,7 +1381,7 @@ local _country
 _country=$(curl -s --max-time 5 ipinfo.io/country 2>/dev/null)
 
 if [ "$_country" = "CN" ]; then
-  bash <(curl -sSL https://linuxmirrors.cn/docker.sh) \
+  _run_remote_bash https://linuxmirrors.cn/docker.sh \
     --source mirrors.huaweicloud.com/docker-ce \
     --source-registry docker.1ms.run \
     --protocol https \
@@ -1362,7 +1390,7 @@ if [ "$_country" = "CN" ]; then
     --close-firewall false \
     --ignore-backup-tips
 else
-  bash <(curl -sSL https://linuxmirrors.cn/docker.sh) \
+  _run_remote_bash https://linuxmirrors.cn/docker.sh \
     --source download.docker.com \
     --source-registry registry.hub.docker.com \
     --protocol https \
@@ -1816,8 +1844,12 @@ if [ "$n_res_opt" == "0" ]; then continue; fi
 if [[ "$n_res_opt" =~ ^[0-9]+$ ]] && [ "$n_res_opt" -ge 1 ] && [ "$n_res_opt" -le "${#n_backups[@]}" ]; then
 if ! confirm_action "还原此备份 (当前配置将被覆盖，且服务会在后台重启)" "n"; then continue; fi
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
-[ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" /usr/local/etc/xray/config.json && ( sleep 1; _svc_restart xray >/dev/null 2>&1 ) &
-[ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && ( sleep 1; _svc_reload sing-box >/dev/null 2>&1 ) &
+if [ -f "$sel_bk/xray_config.json" ]; then
+  cp "$sel_bk/xray_config.json" /usr/local/etc/xray/config.json && ( sleep 1; _svc_restart xray >/dev/null 2>&1 ) &
+fi
+if [ -f "$sel_bk/singbox_config.json" ]; then
+  cp "$sel_bk/singbox_config.json" /etc/sing-box/config.json && ( sleep 1; _svc_reload sing-box >/dev/null 2>&1 ) &
+fi
 [ -f "$sel_bk/vpsbox_nodes.txt" ] && cp "$sel_bk/vpsbox_nodes.txt" "$NODE_RECORD_FILE"
 echo -e "\n${GREEN}[成功] 节点配置已成功还原！服务将在后台重启。${NC}"; pause_for_enter
 else
@@ -1860,25 +1892,25 @@ done
 if ! confirm_action "永久删除端口为 $del_port 的节点" "n"; then pause_for_enter; return; fi
 if [ -f "/usr/local/etc/xray/config.json" ]; then
 if jq -e ".inbounds[] | select(.port == $del_port)" /usr/local/etc/xray/config.json > /dev/null 2>&1; then
-jq "del(.inbounds[] | select(.port == $del_port))" /usr/local/etc/xray/config.json > /tmp/xray_tmp.json
-if [ -s /tmp/xray_tmp.json ]; then
-mv /tmp/xray_tmp.json /usr/local/etc/xray/config.json
+local xray_tmp; xray_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时文件！${NC}"; pause_for_enter; return; }
+if jq "del(.inbounds[] | select(.port == $del_port))" /usr/local/etc/xray/config.json > "$xray_tmp" && jq empty "$xray_tmp" >/dev/null 2>&1; then
+mv "$xray_tmp" /usr/local/etc/xray/config.json
 echo -e "${GREEN}[成功] 已成功移除 Xray 中占用端口 $del_port 的节点配置！${NC}"
 ( sleep 1; _svc_restart xray >/dev/null 2>&1 ) &
 else
-rm -f /tmp/xray_tmp.json; echo -e "${RED}[错误] Xray 节点删除失败，配置可能受损！${NC}"
+rm -f "$xray_tmp"; echo -e "${RED}[错误] Xray 节点删除失败，配置可能受损！${NC}"
 fi
 fi
 fi
 if [ -f "/etc/sing-box/config.json" ]; then
 if jq -e ".inbounds[] | select(.listen_port == $del_port)" /etc/sing-box/config.json > /dev/null 2>&1; then
-jq "del(.inbounds[] | select(.listen_port == $del_port))" /etc/sing-box/config.json > /tmp/sb_tmp.json
-if [ -s /tmp/sb_tmp.json ]; then
-mv /tmp/sb_tmp.json /etc/sing-box/config.json
+local sb_tmp; sb_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时文件！${NC}"; pause_for_enter; return; }
+if jq "del(.inbounds[] | select(.listen_port == $del_port))" /etc/sing-box/config.json > "$sb_tmp" && jq empty "$sb_tmp" >/dev/null 2>&1; then
+mv "$sb_tmp" /etc/sing-box/config.json
 echo -e "${GREEN}[成功] 已成功移除 Sing-box 中占用端口 $del_port 的节点配置！${NC}"
 ( sleep 1; _svc_reload sing-box >/dev/null 2>&1 ) &
 else
-rm -f /tmp/sb_tmp.json; echo -e "${RED}[错误] Sing-box 节点删除失败，配置可能受损！${NC}"
+rm -f "$sb_tmp"; echo -e "${RED}[错误] Sing-box 节点删除失败，配置可能受损！${NC}"
 fi
 fi
 fi
@@ -2011,13 +2043,13 @@ if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then
 fi
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 X_BIN=$(command -v xray || echo "/usr/local/bin/xray"); KEYS=$("$X_BIN" x25519)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
 NEW_INBOUND='{"port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"dest":"'$SNI_DOMAIN':443","serverNames":["'$SNI_DOMAIN'"],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
@@ -2096,7 +2128,7 @@ if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
 fi
 
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
 
 PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
 NEW_INBOUND='{"type":"anytls","listen":"::","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
@@ -2126,7 +2158,7 @@ acquire_cert() {
     mkdir -p "$CERT_DIR"
 
     install_dependencies
-    [ ! -d "/root/.acme.sh" ] && curl https://get.acme.sh | sh -s email=dummy@vpsbox.com >/dev/null 2>&1
+    [ ! -d "/root/.acme.sh" ] && _run_remote_bash https://get.acme.sh email=dummy@vpsbox.com >/dev/null 2>&1
     if [ ! -f "/root/.acme.sh/acme.sh" ]; then echo -e "\n${RED}[错误] Acme.sh 安装失败！${NC}"; return 1; fi
     /root/.acme.sh/acme.sh --upgrade --auto-upgrade >/dev/null 2>&1
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
@@ -2256,11 +2288,11 @@ acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"port":'$WS_PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"wsSettings":{"path":"'$WSPATH'"}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
@@ -2348,11 +2380,11 @@ acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_
 HY2_PASS=$(openssl rand -hex 8)
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","email":"user@vpsbox"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"alpn":["h3"],"minVersion":"1.3","certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2,"auth":"'$HY2_PASS'","udpIdleTimeout":60}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; bash <(curl -fsSL https://sing-box.app/install.sh) > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
 NEW_INBOUND='{"type":"hysteria2","listen":"::","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
@@ -2655,16 +2687,11 @@ case $sk_opt in
     echo -e "${YELLOW}已跳过 SSH 配置修改，密钥文件已生成可稍后手动配置。${NC}"
     pause_for_enter; continue
   fi
-  sed -i -e 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' \
-         -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
-         -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' \
-         -e 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  _set_sshd_option PermitRootLogin prohibit-password || { pause_for_enter; continue; }
+  _set_sshd_option PasswordAuthentication no || { pause_for_enter; continue; }
+  _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
+  _set_sshd_option ChallengeResponseAuthentication no || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo ""
   echo -e "${GREEN}[成功] 密钥已生成，密码登录已关闭。请用私钥文件登录。${NC}"
@@ -2681,13 +2708,8 @@ case $sk_opt in
     echo -e "${YELLOW}该公钥已存在，无需重复添加。${NC}"; sleep 2; continue
   fi
   echo "$_pubkey" >> "${HOME}/.ssh/authorized_keys"
-  sed -i -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 公钥已导入并启用密钥登录。${NC}"; pause_for_enter ;;
 3)
@@ -2699,16 +2721,14 @@ case $sk_opt in
   if [ -z "$_ghkeys" ]; then
     echo -e "${RED}[错误] 无法获取 GitHub 公钥，请检查用户名或网络。${NC}"; sleep 2; continue
   fi
+  if ! echo "$_ghkeys" | _valid_ssh_key_lines; then
+    echo -e "${RED}[错误] GitHub 返回内容不是有效 SSH 公钥，已拒绝导入。${NC}"; sleep 2; continue
+  fi
   mkdir -p "${HOME}/.ssh"; chmod 700 "${HOME}/.ssh"
   touch "${HOME}/.ssh/authorized_keys"; chmod 600 "${HOME}/.ssh/authorized_keys"
   echo "$_ghkeys" >> "${HOME}/.ssh/authorized_keys"
-  sed -i -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 已从 GitHub(${_ghuser}) 导入公钥。${NC}"; pause_for_enter ;;
 4)
@@ -2720,10 +2740,14 @@ case $sk_opt in
   if [ -z "$_remote_keys" ]; then
     echo -e "${RED}[错误] 无法从 URL 获取公钥。${NC}"; sleep 2; continue
   fi
+  if ! echo "$_remote_keys" | _valid_ssh_key_lines; then
+    echo -e "${RED}[错误] URL 返回内容不是有效 SSH 公钥，已拒绝导入。${NC}"; sleep 2; continue
+  fi
   mkdir -p "${HOME}/.ssh"; chmod 700 "${HOME}/.ssh"
   touch "${HOME}/.ssh/authorized_keys"; chmod 600 "${HOME}/.ssh/authorized_keys"
   echo "$_remote_keys" >> "${HOME}/.ssh/authorized_keys"
-  sed -i -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+  _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 已从 URL 导入公钥。${NC}"; pause_for_enter ;;
 5)
@@ -2733,26 +2757,16 @@ case $sk_opt in
   echo -e "${CYAN}----------------------------${NC}"
   pause_for_enter ;;
 6)
-  sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
-         -e 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  _set_sshd_option PasswordAuthentication yes || { pause_for_enter; continue; }
+  _set_sshd_option PermitRootLogin yes || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 密码登录已开启。${NC}"; pause_for_enter ;;
 7)
-  sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' \
-         -e 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' \
-         -e 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-  # 安全处理 sshd_config.d 覆盖：注释冲突配置而非直接删除文件
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  _set_sshd_option PasswordAuthentication no || { pause_for_enter; continue; }
+  _set_sshd_option PermitRootLogin prohibit-password || { pause_for_enter; continue; }
+  _set_sshd_option PubkeyAuthentication yes || { pause_for_enter; continue; }
+  _harden_sshd_dropins
   _svc_restart sshd 2>/dev/null || _svc_restart ssh 2>/dev/null
   echo -e "${GREEN}[成功] 密码登录已关闭，仅允许密钥登录。${NC}"; pause_for_enter ;;
 0) break ;;
