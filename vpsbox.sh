@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.3 — 版本检测全面审查，注释/超时/前缀统一修正
+# 版本: v1.6.4 — systemd-resolved DNS 持久化 + 正确显示当前DNS
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.3"
+VPSBOX_VERSION="v1.6.4"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -552,9 +552,18 @@ print_center "[ 系统 DNS 优化 ]" "$CYAN"
 
 echo -e "  ${CYAN}当前 DNS 配置:${NC}"
 echo "  ─────────────────────────────"
-grep '^nameserver' /etc/resolv.conf 2>/dev/null | while read -r line; do
-  echo -e "  ${YELLOW}${line}${NC}"
-done
+if _svc_is_active systemd-resolved >/dev/null 2>&1; then
+  local _dns_servers; _dns_servers=$(resolvectl dns 2>/dev/null | grep -v "^Link\|^$" | awk '{for(i=2;i<=NF;i++) print "nameserver "$i}' | sort -u)
+  if [ -n "$_dns_servers" ]; then
+    echo "$_dns_servers" | while read -r line; do echo -e "  ${YELLOW}${line}${NC}"; done
+  else
+    resolvectl status 2>/dev/null | grep "DNS Servers:" | head -1 | sed 's/.*DNS Servers: /  nameserver /' | while read -r line; do echo -e "  ${YELLOW}${line}${NC}"; done
+  fi
+else
+  grep '^nameserver' /etc/resolv.conf 2>/dev/null | while read -r line; do
+    echo -e "  ${YELLOW}${line}${NC}"
+  done
+fi
 echo "  ─────────────────────────────"
 echo ""
 echo -e "  ${GREEN}1.${NC} 国际优化  CF 1.1.1.1 + Google 8.8.8.8"
@@ -605,7 +614,11 @@ EOF
   fi
   echo ""
   echo -e "  ${CYAN}生效后的 DNS:${NC}"
-  grep '^nameserver' /etc/resolv.conf | while read -r line; do echo -e "  ${GREEN}${line}${NC}"; done
+  if _svc_is_active systemd-resolved >/dev/null 2>&1; then
+    resolvectl dns 2>/dev/null | grep -v "^Link\|^$" | awk '{for(i=2;i<=NF;i++) print "nameserver "$i}' | sort -u | while read -r line; do echo -e "  ${GREEN}${line}${NC}"; done
+  else
+    grep '^nameserver' /etc/resolv.conf | while read -r line; do echo -e "  ${GREEN}${line}${NC}"; done
+  fi
 }
 
 case $dns_opt in
