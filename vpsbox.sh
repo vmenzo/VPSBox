@@ -671,13 +671,9 @@ dns_opt="${dns_opt// /}"
 
 _apply_dns() {
   local d1v4="$1" d2v4="$2" d1v6="$3" d2v6="$4"
-  chattr -i /etc/resolv.conf 2>/dev/null
-  > /etc/resolv.conf
-  local has_v4; has_v4=$(ip -4 addr show scope global 2>/dev/null | grep -c 'inet ')
-  local has_v6; has_v6=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6 ')
-  [ "$has_v4" -gt 0 ] && { echo "nameserver $d1v4" >> /etc/resolv.conf; echo "nameserver $d2v4" >> /etc/resolv.conf; }
-  [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ] && { echo "nameserver $d1v6" >> /etc/resolv.conf; echo "nameserver $d2v6" >> /etc/resolv.conf; }
-  [ -s /etc/resolv.conf ] || { echo "nameserver $d1v4" >> /etc/resolv.conf; echo "nameserver $d2v4" >> /etc/resolv.conf; }
+  local has_v4 has_v6 resolv_tmp
+  has_v4=$(ip -4 addr show scope global 2>/dev/null | grep -c 'inet ')
+  has_v6=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6 ')
   if _svc_is_active systemd-resolved >/dev/null 2>&1; then
     # 1) 全局 DNS 持久化配置
     mkdir -p /etc/systemd/resolved.conf.d
@@ -700,6 +696,13 @@ EOF
     echo -e "${GREEN}[成功] DNS 已写入 systemd-resolved 并重启！${NC}"
     echo -e "${YELLOW}[提示] 已全局锁定，DHCP 续租不会覆盖。${NC}"
   else
+    resolv_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时 DNS 文件。${NC}"; return 1; }
+    [ "$has_v4" -gt 0 ] && { echo "nameserver $d1v4" >> "$resolv_tmp"; echo "nameserver $d2v4" >> "$resolv_tmp"; }
+    [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ] && { echo "nameserver $d1v6" >> "$resolv_tmp"; echo "nameserver $d2v6" >> "$resolv_tmp"; }
+    [ -s "$resolv_tmp" ] || { echo "nameserver $d1v4" >> "$resolv_tmp"; echo "nameserver $d2v4" >> "$resolv_tmp"; }
+    chattr -i /etc/resolv.conf 2>/dev/null
+    cat "$resolv_tmp" > /etc/resolv.conf
+    rm -f "$resolv_tmp"
     chattr +i /etc/resolv.conf 2>/dev/null
     echo -e "${GREEN}[成功] DNS 已写入并锁定！${NC}"
   fi
@@ -3137,7 +3140,7 @@ case $OPTION in
 15) fail2ban_install ;;
 16) install_warp ;;
 17) manage_ufw ;;
-18|00) manage_script ;;
+18) manage_script ;;
 19) menu_nodes ;;
 20) disk_manager ;;
 21) crontab_manager ;;
