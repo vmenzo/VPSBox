@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.9 — 主菜单展开更多功能并优化中文对齐
+# 版本: v1.6.10 — 固定右侧菜单编号列对齐
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.9"
+VPSBOX_VERSION="v1.6.10"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3003,12 +3003,13 @@ _display_width() {
 
 menu_pair() {
   # 参数: 左编号 左标题 右编号 右标题
-  # 不用 printf %-Ns 直接填中文，避免 UTF-8 字节宽度导致错位
+  # 右侧编号固定到同一显示列；中文按显示宽度补空格，保证 2/4/6/8/10/14/16/18 纵向对齐
   local l_no="$1" l_title="$2" r_no="$3" r_title="$4"
-  local l_plain l_width pad col_width=34
-  l_plain=$(printf "%2s. %s" "$l_no" "$l_title")
-  l_width=$(_display_width "$l_plain")
-  pad=$(( col_width - l_width ))
+  local left_plain left_width pad right_col=40
+  left_plain=$(printf "%2s. %s" "$l_no" "$l_title")
+  left_width=$(_display_width "$left_plain")
+  # 行首固定两个空格；right_col 是整行中右侧编号开始的显示列
+  pad=$(( right_col - 2 - left_width ))
   [ "$pad" -lt 2 ] && pad=2
   printf "  ${GREEN}%2s${NC}. %s%*s${GREEN}%2s${NC}. %s\n" "$l_no" "$l_title" "$pad" "" "$r_no" "$r_title"
 }
