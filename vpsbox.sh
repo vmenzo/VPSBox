@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.8 — 优化主菜单布局并取消自动更新检测
+# 版本: v1.6.9 — 主菜单展开更多功能并优化中文对齐
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.8"
+VPSBOX_VERSION="v1.6.9"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -2992,9 +2992,30 @@ menu_logo() {
   echo ""
 }
 
+_display_width() {
+  # 近似计算终端显示宽度：ASCII=1，常见 CJK UTF-8 字符=2
+  local text="$1" chars bytes cjk
+  chars=${#text}
+  bytes=$(printf "%s" "$text" | wc -c | tr -d ' ')
+  cjk=$(( (bytes - chars) / 2 ))
+  echo $(( chars + cjk ))
+}
+
 menu_pair() {
   # 参数: 左编号 左标题 右编号 右标题
-  printf "  ${GREEN}%2s${NC}. %-20s ${GREEN}%2s${NC}. %-20s\n" "$1" "$2" "$3" "$4"
+  # 不用 printf %-Ns 直接填中文，避免 UTF-8 字节宽度导致错位
+  local l_no="$1" l_title="$2" r_no="$3" r_title="$4"
+  local l_plain l_width pad col_width=34
+  l_plain=$(printf "%2s. %s" "$l_no" "$l_title")
+  l_width=$(_display_width "$l_plain")
+  pad=$(( col_width - l_width ))
+  [ "$pad" -lt 2 ] && pad=2
+  printf "  ${GREEN}%2s${NC}. %s%*s${GREEN}%2s${NC}. %s\n" "$l_no" "$l_title" "$pad" "" "$r_no" "$r_title"
+}
+
+menu_single() {
+  local no="$1" title="$2"
+  printf "  ${GREEN}%2s${NC}. %s\n" "$no" "$title"
 }
 
 menu_back_hint() {
@@ -3040,26 +3061,6 @@ esac
 done
 }
 
-menu_more_tools() {
-while true; do
-menu_header "更多工具"
-echo -e "  ${CYAN}低频但有用的功能放在这里，避免主菜单太挤。${NC}\n"
-menu_pair 1 "磁盘分区管理" 2 "定时任务管理"
-menu_pair 3 "基础工具箱" 4 "调优备份/还原"
-menu_back_hint
-_read_menu_choice more_opt "> 请选择 [0-4]: "
-[ -z "$more_opt" ] && continue
-case $more_opt in
- 1) disk_manager ;;
- 2) crontab_manager ;;
- 3) tools_manager ;;
- 4) manage_backup ;;
- 0) return ;;
- *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
-esac
-done
-}
-
 # 主循环函数，调用时 stdin 重定向到 /dev/tty
 _vpsbox_main() {
 while true; do
@@ -3081,13 +3082,15 @@ menu_pair 17 "UFW 防火墙" 18 "脚本管理"
 
 echo ""
 echo -e "  ${CYAN}更多功能${NC}"
-menu_pair 19 "节点管理" 20 "更多工具"
+menu_pair 19 "节点管理" 20 "磁盘分区"
+menu_pair 21 "定时任务" 22 "基础工具箱"
+menu_single 23 "调优备份/还原"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-20]: "
+_read_menu_choice OPTION "> 请选择 [0-23]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -3109,7 +3112,10 @@ case $OPTION in
 17) manage_ufw ;;
 18|00) manage_script ;;
 19) menu_nodes ;;
-20) menu_more_tools ;;
+20) disk_manager ;;
+21) crontab_manager ;;
+22) tools_manager ;;
+23) manage_backup ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
