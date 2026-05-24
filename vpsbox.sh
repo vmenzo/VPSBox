@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.7 — 美化主菜单并增加分类二级菜单
+# 版本: v1.6.8 — 优化主菜单布局并取消自动更新检测
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.7"
+VPSBOX_VERSION="v1.6.8"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -35,17 +35,17 @@ exit 1
 fi
 # 退出时清理临时测试配置文件
 trap 'rm -f /tmp/vpsbox_test_config.json' EXIT
-# 自动注册全局命令（后台异步，不阻塞启动）
-if [ "$0" != "$SHORTCUT_PATH" ] && [ ! -s "$SHORTCUT_PATH" ]; then
-    if [ ! -t 0 ]; then
-        # 管道模式：后台下载，不阻塞菜单
-        { _tmp=$(mktemp); curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$_tmp" 2>/dev/null && install -m 755 "$_tmp" "$SHORTCUT_PATH"; rm -f "$_tmp"; } &
-    elif [ -f "$0" ] && cp "$0" "$SHORTCUT_PATH" 2>/dev/null; then
-        chmod +x "$SHORTCUT_PATH"
-    else
-        { _tmp=$(mktemp); curl -fsSL --connect-timeout 5 --max-time 10 "$SCRIPT_URL" -o "$_tmp" 2>/dev/null && install -m 755 "$_tmp" "$SHORTCUT_PATH"; rm -f "$_tmp"; } &
+# 自动注册/同步全局命令（不联网检测更新；仅把当前运行脚本同步到 vpsbox）
+_sync_shortcut_from_current() {
+    [ "$0" = "$SHORTCUT_PATH" ] && return 0
+    local shortcut_ver=""
+    [ -s "$SHORTCUT_PATH" ] && shortcut_ver=$(grep -oP '^VPSBOX_VERSION="\K[^"]+' "$SHORTCUT_PATH" 2>/dev/null | head -1)
+    [ "$shortcut_ver" = "$VPSBOX_VERSION" ] && return 0
+    if [ -f "$0" ]; then
+        install -m 755 "$0" "$SHORTCUT_PATH" 2>/dev/null || true
     fi
-fi
+}
+_sync_shortcut_from_current
 if [ -f /etc/os-release ]; then
 . /etc/os-release
 # 允许所有主流 Linux 发行版运行
@@ -2965,30 +2965,36 @@ done
 }
 
 # =====================================================================
-# 主菜单与二级菜单
+# 主菜单与少量二级菜单
 # =====================================================================
-menu_item() {
-  # 用固定宽度编号列 + 双列布局，中文环境下保持视觉对齐
-  # 参数: 编号 标题 [说明]
-  local no="$1" title="$2" desc="$3"
-  if [ -n "$desc" ]; then
-    printf "  ${GREEN}%2s${NC}. %-18s ${YELLOW}%s${NC}\n" "$no" "$title" "$desc"
-  else
-    printf "  ${GREEN}%2s${NC}. %s\n" "$no" "$title"
-  fi
-}
-
-menu_pair() {
-  # 参数: 左编号 左标题 右编号 右标题
-  printf "  ${GREEN}%2s${NC}. %-22s ${GREEN}%2s${NC}. %-22s\n" "$1" "$2" "$3" "$4"
-}
-
 menu_header() {
   clear_screen
   print_divider
   print_center "$1" "$PURPLE"
   print_divider
   echo ""
+}
+
+menu_logo() {
+  clear_screen
+  print_divider
+  echo -e "${PURPLE}"
+  echo " __      _______   _____ ____             "
+  echo " \ \    / /  __ \ / ____|  _ \            "
+  echo "  \ \  / /| |__) | (___ | |_) | _____  __"
+  echo "   \ \/ / |  ___/ \___ \|  _ < / _ \ \/ /"
+  echo "    \  /  | |     ____) | |_) | (_) >  < "
+  echo '     \/   |_|    |_____/|____/ \___/_/\_\'
+  echo -e "${NC}"
+  print_center "轻量级节点管理与服务器优化工具  ·  ${VPSBOX_VERSION}" "$CYAN"
+  print_center "快捷命令: vpsbox" "$YELLOW"
+  print_divider
+  echo ""
+}
+
+menu_pair() {
+  # 参数: 左编号 左标题 右编号 右标题
+  printf "  ${GREEN}%2s${NC}. %-20s ${GREEN}%2s${NC}. %-20s\n" "$1" "$2" "$3" "$4"
 }
 
 menu_back_hint() {
@@ -3007,62 +3013,6 @@ _read_menu_choice() {
     exit 1
   fi
   printf -v "$__var" '%s' "$__choice"
-}
-
-menu_system() {
-while true; do
-menu_header "系统管理"
-echo -e "  ${CYAN}基础维护${NC}"
-menu_pair 1 "系统信息总览" 2 "系统更新与升级"
-menu_pair 3 "系统垃圾清理" 4 "修改 root 密码"
-menu_pair 5 "修改主机名" 6 "修改系统时区"
-echo ""
-echo -e "  ${CYAN}系统组件${NC}"
-menu_pair 7 "虚拟内存 Swap" 8 "DNS 极速优化"
-menu_pair 9 "磁盘分区管理" 10 "定时任务管理"
-menu_back_hint
-_read_menu_choice sys_opt "> 请选择 [0-10]: "
-[ -z "$sys_opt" ] && continue
-case $sys_opt in
- 1) system_overview ;;
- 2) system_update ;;
- 3) system_clean ;;
- 4) change_root_password ;;
- 5) change_hostname ;;
- 6) set_china_timezone ;;
- 7) manage_swap ;;
- 8) optimize_dns ;;
- 9) disk_manager ;;
-10) crontab_manager ;;
- 0) return ;;
- *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
-esac
-done
-}
-
-menu_network() {
-while true; do
-menu_header "网络优化"
-echo -e "  ${CYAN}TCP / BBR${NC}"
-menu_pair 1 "TCP 智能调优" 2 "调优备份/还原"
-menu_pair 3 "BBR 拥塞控制" 4 "IP质量/流媒体检测"
-echo ""
-echo -e "  ${CYAN}连接与解锁${NC}"
-menu_pair 5 "WARP 解锁" 6 "DNS 极速优化"
-menu_back_hint
-_read_menu_choice net_opt "> 请选择 [0-6]: "
-[ -z "$net_opt" ] && continue
-case $net_opt in
- 1) apply_tuning ;;
- 2) manage_backup ;;
- 3) manage_bbr ;;
- 4) check_media_unlock ;;
- 5) install_warp ;;
- 6) optimize_dns ;;
- 0) return ;;
- *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
-esac
-done
 }
 
 menu_nodes() {
@@ -3090,25 +3040,20 @@ esac
 done
 }
 
-menu_security_tools() {
+menu_more_tools() {
 while true; do
-menu_header "安全与工具"
-echo -e "  ${CYAN}SSH / 防火墙${NC}"
-menu_pair 1 "修改 SSH 端口" 2 "SSH 密钥管理"
-menu_pair 3 "Fail2Ban 防护" 4 "UFW 防火墙"
-echo ""
-echo -e "  ${CYAN}常用工具${NC}"
-menu_pair 5 "Docker 一键安装" 6 "基础工具箱"
+menu_header "更多工具"
+echo -e "  ${CYAN}低频但有用的功能放在这里，避免主菜单太挤。${NC}\n"
+menu_pair 1 "磁盘分区管理" 2 "定时任务管理"
+menu_pair 3 "基础工具箱" 4 "调优备份/还原"
 menu_back_hint
-_read_menu_choice sec_opt "> 请选择 [0-6]: "
-[ -z "$sec_opt" ] && continue
-case $sec_opt in
- 1) change_ssh_port ;;
- 2) manage_sshkey ;;
- 3) fail2ban_install ;;
- 4) manage_ufw ;;
- 5) docker_install ;;
- 6) tools_manager ;;
+_read_menu_choice more_opt "> 请选择 [0-4]: "
+[ -z "$more_opt" ] && continue
+case $more_opt in
+ 1) disk_manager ;;
+ 2) crontab_manager ;;
+ 3) tools_manager ;;
+ 4) manage_backup ;;
  0) return ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
@@ -3117,54 +3062,54 @@ done
 
 # 主循环函数，调用时 stdin 重定向到 /dev/tty
 _vpsbox_main() {
-_VER_CHECKED=0
-
 while true; do
-menu_header "VPS Box  节点部署与服务器管家"
-echo -e "  ${CYAN}选择一个分类进入二级菜单：${NC}\n"
-menu_pair 1 "系统管理" 2 "网络优化"
-menu_pair 3 "节点管理" 4 "安全与工具"
-menu_pair 5 "脚本管理" 0 "退出"
+menu_logo
+
+echo -e "  ${CYAN}系统维护${NC}"
+menu_pair 1 "系统总览" 2 "更新系统"
+menu_pair 3 "垃圾清理" 4 "Root 密码"
+menu_pair 5 "修改主机名" 6 "系统时区"
+menu_pair 7 "Swap 管理" 8 "DNS 优化"
+menu_pair 9 "SSH 端口" 10 "SSH 密钥"
+
+echo ""
+echo -e "  ${CYAN}网络与安全${NC}"
+menu_pair 11 "TCP 调优" 12 "BBR 管理"
+menu_pair 13 "流媒体检测" 14 "Docker"
+menu_pair 15 "Fail2Ban" 16 "WARP 解锁"
+menu_pair 17 "UFW 防火墙" 18 "脚本管理"
+
+echo ""
+echo -e "  ${CYAN}更多功能${NC}"
+menu_pair 19 "节点管理" 20 "更多工具"
 
 echo ""
 print_divider
-# 版本检测：首次运行时后台异步，不阻塞菜单显示
-if [ "$_VER_CHECKED" -eq 0 ]; then
-    _VER_CHECKED=1
-    { _rmt=$(curl -sL --connect-timeout 2 --max-time 3 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
-      _rmt="${_rmt#v}"
-      local_ver="${VPSBOX_VERSION#v}"
-      if [ -n "$_rmt" ] && [ -n "$local_ver" ] && [ "$_rmt" != "$local_ver" ]; then
-          IFS='.' read -ra rmt_parts <<< "$_rmt"
-          IFS='.' read -ra loc_parts <<< "$local_ver"
-          newer=0
-          for i in 0 1 2; do
-              r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
-              if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
-              if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
-          done
-          if [ "$newer" -eq 1 ]; then
-              echo -e "   ${GREEN}[新版本可用] v${_rmt} (当前: v${local_ver}) → 请选择 5 更新${NC}" > /tmp/vpsbox_version_msg
-          fi
-      fi
-    } &
-fi
-# 显示缓存版本消息（上次后台检测的结果）
-if [ -f /tmp/vpsbox_version_msg ]; then
-    cat /tmp/vpsbox_version_msg
-    rm -f /tmp/vpsbox_version_msg
-else
-    echo ""
-fi
+echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-5]: "
+_read_menu_choice OPTION "> 请选择 [0-20]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
- 1) menu_system ;;
- 2) menu_network ;;
- 3) menu_nodes ;;
- 4) menu_security_tools ;;
- 5|00) manage_script ;;
+ 1) system_overview ;;
+ 2) system_update ;;
+ 3) system_clean ;;
+ 4) change_root_password ;;
+ 5) change_hostname ;;
+ 6) set_china_timezone ;;
+ 7) manage_swap ;;
+ 8) optimize_dns ;;
+ 9) change_ssh_port ;;
+10) manage_sshkey ;;
+11) apply_tuning ;;
+12) manage_bbr ;;
+13) check_media_unlock ;;
+14) docker_install ;;
+15) fail2ban_install ;;
+16) install_warp ;;
+17) manage_ufw ;;
+18|00) manage_script ;;
+19) menu_nodes ;;
+20) menu_more_tools ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
