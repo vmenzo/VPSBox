@@ -579,7 +579,26 @@ _apply_dns() {
   [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ] && { echo "nameserver $d1v6" >> /etc/resolv.conf; echo "nameserver $d2v6" >> /etc/resolv.conf; }
   [ -s /etc/resolv.conf ] || { echo "nameserver $d1v4" >> /etc/resolv.conf; echo "nameserver $d2v4" >> /etc/resolv.conf; }
   if _svc_is_active systemd-resolved >/dev/null 2>&1; then
-    echo -e "${YELLOW}[提示] systemd-resolved 接管中，重启后 DNS 可能被覆盖。${NC}"
+    # 1) 全局 DNS 持久化配置
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/vpsbox-dns.conf << EOF
+[Resolve]
+DNS=$d1v4 $d2v4
+EOF
+    if [ -n "$d1v6" ]; then
+      sed -i "/^DNS=/s/$/ $d1v6 $d2v6/" /etc/systemd/resolved.conf.d/vpsbox-dns.conf
+    fi
+    # 2) 覆盖所有活跃链路的 DHCP DNS
+    for _link in $(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo); do
+      if [ -n "$d1v6" ]; then
+        resolvectl dns "$_link" "$d1v4" "$d2v4" "$d1v6" "$d2v6" 2>/dev/null
+      else
+        resolvectl dns "$_link" "$d1v4" "$d2v4" 2>/dev/null
+      fi
+    done
+    systemctl restart systemd-resolved 2>/dev/null
+    echo -e "${GREEN}[成功] DNS 已写入 systemd-resolved 并重启！${NC}"
+    echo -e "${YELLOW}[提示] 已全局锁定，DHCP 续租不会覆盖。${NC}"
   else
     chattr +i /etc/resolv.conf 2>/dev/null
     echo -e "${GREEN}[成功] DNS 已写入并锁定！${NC}"
