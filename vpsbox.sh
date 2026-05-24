@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.6 — 继续加固远程脚本、Swap 与 SSH 密钥管理
+# 版本: v1.6.7 — 美化主菜单并增加分类二级菜单
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.6"
+VPSBOX_VERSION="v1.6.7"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -64,7 +64,7 @@ if ! grep -qE "^[[:space:]]*[0-9:.]+[[:space:]].*(^|[[:space:]])$(hostname)([[:s
 echo "127.0.1.1 $(hostname)" >> /etc/hosts
 fi
 
-clear_screen() { clear; }
+clear_screen() { [ -n "${TERM:-}" ] && [ "$TERM" != "dumb" ] && clear || printf '\n'; }
 
 CPU_CORES=$(nproc)
 RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
@@ -2964,42 +2964,170 @@ esac
 done
 }
 
+# =====================================================================
+# 主菜单与二级菜单
+# =====================================================================
+menu_item() {
+  # 用固定宽度编号列 + 双列布局，中文环境下保持视觉对齐
+  # 参数: 编号 标题 [说明]
+  local no="$1" title="$2" desc="$3"
+  if [ -n "$desc" ]; then
+    printf "  ${GREEN}%2s${NC}. %-18s ${YELLOW}%s${NC}\n" "$no" "$title" "$desc"
+  else
+    printf "  ${GREEN}%2s${NC}. %s\n" "$no" "$title"
+  fi
+}
+
+menu_pair() {
+  # 参数: 左编号 左标题 右编号 右标题
+  printf "  ${GREEN}%2s${NC}. %-22s ${GREEN}%2s${NC}. %-22s\n" "$1" "$2" "$3" "$4"
+}
+
+menu_header() {
+  clear_screen
+  print_divider
+  print_center "$1" "$PURPLE"
+  print_divider
+  echo ""
+}
+
+menu_back_hint() {
+  echo ""
+  print_divider
+  echo -e "  ${GREEN} 0${NC}. 返回主菜单"
+  echo ""
+}
+
+_read_menu_choice() {
+  local __var="$1" __prompt="$2" __choice
+  read -r -p "$__prompt" __choice
+  __choice="${__choice// /}"
+  if [ -z "$__choice" ] && [ ! -t 0 ]; then
+    echo -e "\n${RED}[提示] 检测到输入流异常，请使用 ${GREEN}bash <(curl -sL ${SCRIPT_URL})${NC} 方式运行。${NC}"
+    exit 1
+  fi
+  printf -v "$__var" '%s' "$__choice"
+}
+
+menu_system() {
+while true; do
+menu_header "系统管理"
+echo -e "  ${CYAN}基础维护${NC}"
+menu_pair 1 "系统信息总览" 2 "系统更新与升级"
+menu_pair 3 "系统垃圾清理" 4 "修改 root 密码"
+menu_pair 5 "修改主机名" 6 "修改系统时区"
+echo ""
+echo -e "  ${CYAN}系统组件${NC}"
+menu_pair 7 "虚拟内存 Swap" 8 "DNS 极速优化"
+menu_pair 9 "磁盘分区管理" 10 "定时任务管理"
+menu_back_hint
+_read_menu_choice sys_opt "> 请选择 [0-10]: "
+[ -z "$sys_opt" ] && continue
+case $sys_opt in
+ 1) system_overview ;;
+ 2) system_update ;;
+ 3) system_clean ;;
+ 4) change_root_password ;;
+ 5) change_hostname ;;
+ 6) set_china_timezone ;;
+ 7) manage_swap ;;
+ 8) optimize_dns ;;
+ 9) disk_manager ;;
+10) crontab_manager ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
+menu_network() {
+while true; do
+menu_header "网络优化"
+echo -e "  ${CYAN}TCP / BBR${NC}"
+menu_pair 1 "TCP 智能调优" 2 "调优备份/还原"
+menu_pair 3 "BBR 拥塞控制" 4 "IP质量/流媒体检测"
+echo ""
+echo -e "  ${CYAN}连接与解锁${NC}"
+menu_pair 5 "WARP 解锁" 6 "DNS 极速优化"
+menu_back_hint
+_read_menu_choice net_opt "> 请选择 [0-6]: "
+[ -z "$net_opt" ] && continue
+case $net_opt in
+ 1) apply_tuning ;;
+ 2) manage_backup ;;
+ 3) manage_bbr ;;
+ 4) check_media_unlock ;;
+ 5) install_warp ;;
+ 6) optimize_dns ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
+menu_nodes() {
+while true; do
+menu_header "节点管理"
+echo -e "  ${CYAN}部署新节点${NC}"
+menu_pair 1 "VLESS-Reality" 2 "VLESS-WS-TLS"
+menu_pair 3 "AnyTLS" 4 "Hysteria2"
+echo ""
+echo -e "  ${CYAN}已部署节点${NC}"
+menu_pair 5 "查看节点" 6 "删除节点"
+menu_back_hint
+_read_menu_choice node_opt "> 请选择 [0-6]: "
+[ -z "$node_opt" ] && continue
+case $node_opt in
+ 1) install_reality_node ;;
+ 2) install_ws_tls_node ;;
+ 3) install_anytls_node ;;
+ 4) install_hy2_node ;;
+ 5) view_deployed_nodes ;;
+ 6) delete_node ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
+menu_security_tools() {
+while true; do
+menu_header "安全与工具"
+echo -e "  ${CYAN}SSH / 防火墙${NC}"
+menu_pair 1 "修改 SSH 端口" 2 "SSH 密钥管理"
+menu_pair 3 "Fail2Ban 防护" 4 "UFW 防火墙"
+echo ""
+echo -e "  ${CYAN}常用工具${NC}"
+menu_pair 5 "Docker 一键安装" 6 "基础工具箱"
+menu_back_hint
+_read_menu_choice sec_opt "> 请选择 [0-6]: "
+[ -z "$sec_opt" ] && continue
+case $sec_opt in
+ 1) change_ssh_port ;;
+ 2) manage_sshkey ;;
+ 3) fail2ban_install ;;
+ 4) manage_ufw ;;
+ 5) docker_install ;;
+ 6) tools_manager ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
 # 主循环函数，调用时 stdin 重定向到 /dev/tty
 _vpsbox_main() {
 _VER_CHECKED=0
 
 while true; do
-clear_screen; print_divider
-print_center "VPS Box  节点部署与服务器管家" "$PURPLE"
-print_divider
+menu_header "VPS Box  节点部署与服务器管家"
+echo -e "  ${CYAN}选择一个分类进入二级菜单：${NC}\n"
+menu_pair 1 "系统管理" 2 "网络优化"
+menu_pair 3 "节点管理" 4 "安全与工具"
+menu_pair 5 "脚本管理" 0 "退出"
 
-echo -e "  ${CYAN}▶ 系统管理${NC}"
-echo -e "  ${GREEN} 1.${NC} 系统信息总览        ${GREEN} 2.${NC} 系统更新与升级"
-echo -e "  ${GREEN} 3.${NC} 系统垃圾清理        ${GREEN} 4.${NC} 修改 root 密码"
-echo -e "  ${GREEN} 5.${NC} 修改主机名          ${GREEN} 6.${NC} 修改系统时区"
-echo -e "  ${GREEN} 7.${NC} 虚拟内存管理        ${GREEN} 8.${NC} DNS 极速优化"
-echo -e "  ${GREEN} 9.${NC} 修改 SSH 端口       ${GREEN}10.${NC} SSH 密钥管理"
-echo -e "  ${GREEN}11.${NC} 磁盘分区管理        ${GREEN}12.${NC} 定时任务管理"
-echo -e "  ${GREEN}13.${NC} 基础工具箱"
-
-echo -e "\n  ${CYAN}▶ 网络优化${NC}"
-echo -e "  ${GREEN}14.${NC} TCP 智能调优引擎    ${GREEN}15.${NC} 调优参数备份/还原"
-echo -e "  ${GREEN}16.${NC} BBR 拥塞控制管理"
-
-echo -e "\n  ${CYAN}▶ 节点部署${NC}"
-echo -e "  ${GREEN}17.${NC} IP 质量与流媒体检测       ${GREEN}18.${NC} 部署 VLESS-Reality"
-echo -e "  ${GREEN}19.${NC} 部署 VLESS-WS-TLS         ${GREEN}20.${NC} 部署 AnyTLS"
-echo -e "  ${GREEN}21.${NC} 部署 Hysteria2            ${GREEN}22.${NC} 查看已部署节点"
-echo -e "  ${GREEN}23.${NC} 删除指定节点"
-
-echo -e "\n  ${CYAN}▶ 工具与安全${NC}"
-echo -e "  ${GREEN}24.${NC} Docker 一键安装     ${GREEN}25.${NC} Fail2Ban 防暴力破解"
-echo -e "  ${GREEN}26.${NC} WARP 解锁           ${GREEN}27.${NC} UFW 防火墙管理"
-echo -e "  ${GREEN}00.${NC} 脚本管理（更新/卸载）"
-
-echo -e "\n  ${GREEN} 0.${NC} 退出"
-print_divider
 echo ""
+print_divider
 # 版本检测：首次运行时后台异步，不阻塞菜单显示
 if [ "$_VER_CHECKED" -eq 0 ]; then
     _VER_CHECKED=1
@@ -3016,7 +3144,7 @@ if [ "$_VER_CHECKED" -eq 0 ]; then
               if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
           done
           if [ "$newer" -eq 1 ]; then
-              echo -e "   ${GREEN}[新版本可用] v${_rmt} (当前: v${local_ver}) → 请选择 00 更新${NC}" > /tmp/vpsbox_version_msg
+              echo -e "   ${GREEN}[新版本可用] v${_rmt} (当前: v${local_ver}) → 请选择 5 更新${NC}" > /tmp/vpsbox_version_msg
           fi
       fi
     } &
@@ -3029,45 +3157,14 @@ else
     echo ""
 fi
 echo ""
-read -r -p "> 请输入选择 [0-27,00]: " OPTION
-OPTION="${OPTION// /}"
-# 修复：curl|bash 管道关闭或空输入时继续循环而非退出
-if [ -z "$OPTION" ]; then
-    if [ ! -t 0 ]; then
-        echo -e "\n${RED}[提示] 检测到输入流异常，请使用 ${GREEN}bash <(curl -sL ${SCRIPT_URL})${NC} 方式运行。${NC}"
-        exit 1
-    fi
-    continue
-fi
+_read_menu_choice OPTION "> 请选择 [0-5]: "
+[ -z "$OPTION" ] && continue
 case $OPTION in
- 1) system_overview ;;
- 2) system_update ;;
- 3) system_clean ;;
- 4) change_root_password ;;
- 5) change_hostname ;;
- 6) set_china_timezone ;;
- 7) manage_swap ;;
- 8) optimize_dns ;;
- 9) change_ssh_port ;;
-10) manage_sshkey ;;
-11) disk_manager ;;
-12) crontab_manager ;;
-13) tools_manager ;;
-14) apply_tuning ;;
-15) manage_backup ;;
-16) manage_bbr ;;
-17) check_media_unlock ;;
-18) install_reality_node ;;
-19) install_ws_tls_node ;;
-20) install_anytls_node ;;
-21) install_hy2_node ;;
-22) view_deployed_nodes ;;
-23) delete_node ;;
-24) docker_install ;;
-25) fail2ban_install ;;
-26) install_warp ;;
-27) manage_ufw ;;
-00) manage_script ;; 
+ 1) menu_system ;;
+ 2) menu_network ;;
+ 3) menu_nodes ;;
+ 4) menu_security_tools ;;
+ 5|00) manage_script ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
