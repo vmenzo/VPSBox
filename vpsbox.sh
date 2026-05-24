@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.6.10 — 固定右侧菜单编号列对齐
+# 版本: v1.6.11 — 启动时检测新版本并提示
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.6.10"
+VPSBOX_VERSION="v1.6.11"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -46,6 +46,29 @@ _sync_shortcut_from_current() {
     fi
 }
 _sync_shortcut_from_current
+
+# 启动时检测远程版本：只提示，不自动更新
+REMOTE_VERSION=""
+UPDATE_AVAILABLE=0
+_check_startup_update() {
+    local remote_ver local_ver newer i r l
+    remote_ver=$(curl -sL --connect-timeout 2 --max-time 3 "$SCRIPT_URL" 2>/dev/null | grep -oP '^VPSBOX_VERSION="\K[^"]+' | head -1)
+    [ -z "$remote_ver" ] && return 0
+    REMOTE_VERSION="$remote_ver"
+    remote_ver="${remote_ver#v}"
+    local_ver="${VPSBOX_VERSION#v}"
+    [ "$remote_ver" = "$local_ver" ] && return 0
+    IFS='.' read -ra rmt_parts <<< "$remote_ver"
+    IFS='.' read -ra loc_parts <<< "$local_ver"
+    newer=0
+    for i in 0 1 2; do
+        r=${rmt_parts[$i]:-0}; l=${loc_parts[$i]:-0}
+        if [ "$r" -gt "$l" ] 2>/dev/null; then newer=1; break; fi
+        if [ "$r" -lt "$l" ] 2>/dev/null; then break; fi
+    done
+    [ "$newer" -eq 1 ] && UPDATE_AVAILABLE=1
+}
+_check_startup_update
 if [ -f /etc/os-release ]; then
 . /etc/os-release
 # 允许所有主流 Linux 发行版运行
@@ -2988,6 +3011,9 @@ menu_logo() {
   echo -e "${NC}"
   print_center "轻量级节点管理与服务器优化工具  ·  ${VPSBOX_VERSION}" "$CYAN"
   print_center "快捷命令: vpsbox" "$YELLOW"
+  if [ "${UPDATE_AVAILABLE:-0}" -eq 1 ]; then
+    print_center "发现新版本: ${REMOTE_VERSION}  ·  请选择 18 脚本管理手动更新" "$GREEN"
+  fi
   print_divider
   echo ""
 }
