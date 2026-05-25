@@ -4,7 +4,7 @@
 # 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.3"
+VPSBOX_VERSION="v1.7.4"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
