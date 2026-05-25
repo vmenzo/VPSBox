@@ -125,6 +125,44 @@ _ensure_ip() {
     else SERVER_IP="未分配"; fi
 }
 
+_resolve_domain_ips() {
+  local domain="$1"
+  local line ip
+  if command -v getent >/dev/null 2>&1; then
+    while read -r ip _; do
+      [ -n "$ip" ] && echo "$ip"
+    done < <(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | awk '!seen[$0]++')
+    return 0
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    dig +short A "$domain" 2>/dev/null
+    dig +short AAAA "$domain" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+_domain_points_to_server() {
+  local domain="$1"
+  local ip
+  local matched=1
+  while read -r ip; do
+    [ -z "$ip" ] && continue
+    if [ "$ip" = "$SERVER_IPV4" ] || [ "$ip" = "$SERVER_IPV6" ]; then
+      matched=0
+      break
+    fi
+  done < <(_resolve_domain_ips "$domain")
+  return $matched
+}
+
+_domain_resolution_summary() {
+  local domain="$1"
+  local ips
+  ips=$(_resolve_domain_ips "$domain" | paste -sd ',' -)
+  echo "$ips"
+}
+
 get_term_width() {
 local cols
 cols=$(tput cols 2>/dev/null || echo 80)
@@ -218,13 +256,29 @@ _sshd_config_test() {
   else return 0; fi
 }
 
+_collect_public_listen_entries() {
+  ss -H -tlnu 2>/dev/null | awk '
+    {
+      proto=$1; local=$5
+      n=split(local, a, ":")
+      port=a[n]
+      if (port !~ /^[0-9]+$/) next
+      if (local ~ /127\.0\.0\.1:/) next
+      if (local ~ /\[::1\]:/) next
+      if (local ~ /localhost:/) next
+      key=proto":"port
+      if (!seen[key]++) print proto, port
+    }
+  '
+}
+
 _restart_ssh_service_safely() {
   local action_desc="$1"
   if ! _sshd_config_test; then
     echo -e "${RED}[错误] SSH 配置校验失败，已取消重启。${NC}"
     return 1
   fi
-  [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，SSH 服务将在后台短暂重启。${NC}"
+  [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，SSH 服务已安排后台短暂重启，请留意新配置是否生效。${NC}"
   ( sleep 1; _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1 ) &
 }
 
@@ -1433,8 +1487,12 @@ _bbr_ipv6_off() {
   sed -i '/net.ipv6.conf.all.disable_ipv6/d; /net.ipv6.conf.default.disable_ipv6/d' "$conf" /etc/sysctl.conf 2>/dev/null
   echo "net.ipv6.conf.all.disable_ipv6 = 1" >> "$conf"
   echo "net.ipv6.conf.default.disable_ipv6 = 1" >> "$conf"
-  sysctl --system >/dev/null 2>&1
-  echo -e "\n${GREEN}[完成] IPv6 已禁用！${NC}"; pause_for_enter
+  if sysctl --system >/dev/null 2>&1; then
+    echo -e "\n${GREEN}[完成] IPv6 已禁用！${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] IPv6 配置已写入，但 sysctl 应用过程中存在异常，请手动检查。${NC}"
+  fi
+  pause_for_enter
 }
 
 _bbr_ipv6_on() {
@@ -1442,8 +1500,12 @@ _bbr_ipv6_on() {
   sed -i '/net.ipv6.conf.all.disable_ipv6/d; /net.ipv6.conf.default.disable_ipv6/d' "$conf" /etc/sysctl.conf 2>/dev/null
   echo "net.ipv6.conf.all.disable_ipv6 = 0" >> "$conf"
   echo "net.ipv6.conf.default.disable_ipv6 = 0" >> "$conf"
-  sysctl --system >/dev/null 2>&1
-  echo -e "\n${GREEN}[完成] IPv6 已开启！${NC}"; pause_for_enter
+  if sysctl --system >/dev/null 2>&1; then
+    echo -e "\n${GREEN}[完成] IPv6 已开启！${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] IPv6 配置已写入，但 sysctl 应用过程中存在异常，请手动检查。${NC}"
+  fi
+  pause_for_enter
 }
 
 _bbr_sysctl_merge() {
@@ -2534,7 +2596,7 @@ read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
 DOMAIN="${DOMAIN// /}"
 if [ "$DOMAIN" == "0" ]; then return; fi
 if [ -z "$DOMAIN" ]; then continue; fi
-DOMAIN_IP=$(ping -c 1 -n "$DOMAIN" 2>/dev/null | head -n 1 | awk -F '[()]' '{print $2}')
+DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 break
 done
 
@@ -2549,8 +2611,8 @@ if [ "$cert_mode" == "1" ]; then
     read -r -s -p "> CF API Token: " CF_Token; echo ""; [ -z "$CF_Token" ] && continue
     export CF_Token="$CF_Token"; break
 else
-    if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then
-        echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
+    if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
+        echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
         echo -e "${YELLOW}  ⚠️  可能开了 CF 小黄云，请关闭代理或换 API 模式。${NC}"
         read -r -p "> 强行继续？(y/n): " force_continue
         [[ ! "${force_continue// /}" =~ ^[yY]$ ]] && continue
@@ -2700,7 +2762,7 @@ read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
 DOMAIN="${DOMAIN// /}"
 if [ "$DOMAIN" == "0" ]; then return; fi
 if [ -z "$DOMAIN" ]; then continue; fi
-DOMAIN_IP=$(ping -c 1 -n "$DOMAIN" 2>/dev/null | head -n 1 | awk -F '[()]' '{print $2}')
+DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 break
 done
 while true; do
@@ -2771,7 +2833,7 @@ read -r -p "> 请输入域名 (输入 0 取消): " DOMAIN
 DOMAIN="${DOMAIN// /}"
 if [ "$DOMAIN" == "0" ]; then return; fi
 if [ -z "$DOMAIN" ]; then continue; fi
-DOMAIN_IP=$(ping -c 1 -n "$DOMAIN" 2>/dev/null | head -n 1 | awk -F '[()]' '{print $2}')
+DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 break
 done
 while true; do
@@ -2802,8 +2864,8 @@ echo ""
 if [ -z "$CF_Token" ]; then continue; fi
 export CF_Token="$CF_Token"; break
 elif [ "$cert_mode" == "2" ]; then
-if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then 
-echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
+if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then 
+echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
 echo -e "${YELLOW}  ⚠️  可能开启了 Cloudflare 小黄云，Hysteria2 无法通过 CDN 代理！${NC}"
 echo -e "${YELLOW}  请去 CF 控制台关闭该域名的代理（改为灰色云朵），或者换用 API 模式申请证书。${NC}"
 read -r -p "> 是否强行继续？(y/n, 默认 n): " force_continue
@@ -2892,7 +2954,13 @@ pause_for_enter ;;
 echo -e "\n${CYAN}>>> 当前规则列表：${NC}"; ufw status numbered; echo ""
 read -r -p "> 请输入要删除的【规则编号】: " rule_num
 rule_num="${rule_num// /}"
-if [[ "$rule_num" =~ ^[0-9]+$ ]]; then ufw --force delete "$rule_num" || echo -e "${RED}[错误] 删除规则失败。${NC}"; echo -e "${GREEN}[成功] 规则 $rule_num 已尝试删除！${NC}"; fi
+if [[ "$rule_num" =~ ^[0-9]+$ ]]; then
+  if ufw --force delete "$rule_num"; then
+    echo -e "${GREEN}[成功] 规则 $rule_num 已删除。${NC}"
+  else
+    echo -e "${RED}[错误] 删除规则失败。${NC}"
+  fi
+fi
 pause_for_enter ;;
 4)
 if ! confirm_action "开启防火墙并默认拦截外部访问 (系统将自动防呆放行 SSH)"; then continue; fi
@@ -2919,11 +2987,20 @@ ufw default deny incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
 ufw allow "$SSHPORT"/tcp > /dev/null 2>&1
 echo -e "${GREEN}  ✓ 放行 SSH: ${SSHPORT}/tcp${NC}"
-USED_PORTS=$(ss -tlnpu 2>/dev/null | awk 'NR>1 {split($5,a,":"); p=a[length(a)]; if(p~/^[0-9]+$/) print p}' | sort -n | uniq)
-for p in $USED_PORTS; do
+USED_LISTENS=$(_collect_public_listen_entries)
+while read -r proto p; do
+  [ -z "$proto" ] && continue
+  [ -z "$p" ] && continue
   [ "$p" = "$SSHPORT" ] && continue
-  ufw allow "$p" > /dev/null 2>&1 && echo -e "${GREEN}  ✓ 放行端口: ${p}${NC}" || echo -e "${YELLOW}  - 端口 ${p} 放行失败${NC}"
-done
+  case "$proto" in
+    tcp)
+      ufw allow "$p/tcp" > /dev/null 2>&1 && echo -e "${GREEN}  ✓ 放行 TCP 端口: ${p}${NC}" || echo -e "${YELLOW}  - TCP 端口 ${p} 放行失败${NC}"
+      ;;
+    udp)
+      ufw allow "$p/udp" > /dev/null 2>&1 && echo -e "${GREEN}  ✓ 放行 UDP 端口: ${p}${NC}" || echo -e "${YELLOW}  - UDP 端口 ${p} 放行失败${NC}"
+      ;;
+  esac
+done <<< "$USED_LISTENS"
 ufw --force enable > /dev/null 2>&1
 ufw reload > /dev/null 2>&1
 echo -e "\n${GREEN}[成功] 防火墙已重新配置！仅放行正在使用的端口。${NC}"
