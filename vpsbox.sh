@@ -4,7 +4,7 @@
 # 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.6"
+VPSBOX_VERSION="v1.7.7"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -1863,7 +1863,7 @@ else:
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
-    adv_component = clamp(latency_factor / (latency_tolerance * (2.8 - 0.7 * latency_ramp)) * adv_factor * (win_base * (0.32 + 0.18 * latency_ramp)) * ((0.75 + 0.35 * latency_ramp) * curve1 + (0.42 + 0.18 * latency_ramp)), 2, max(4, math.ceil(win_max - (5 - 2 * latency_ramp))))
+    adv_component = clamp(latency_factor / (latency_tolerance * (3.0 - 0.9 * latency_ramp)) * adv_factor * (win_base * (0.26 + 0.14 * latency_ramp)) * ((0.62 + 0.26 * latency_ramp) * curve1 + (0.34 + 0.12 * latency_ramp)), 1.5, max(3, math.ceil(win_max - (5.5 - 2.5 * latency_ramp))))
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor
         Q = clamp(1.5 * F, 3, 6)
@@ -1967,6 +1967,8 @@ _bbr_show_dynamic_plan() {
   echo -e "  ${CYAN}调优逻辑:${NC}"
   echo -e "  - RTT <= 120ms: 偏低延迟画像，优先使用 CAKE"
   echo -e "  - RTT > 120ms : 偏长肥管道画像，优先使用 FQ"
+  echo -e "  - 高延迟画像会按 RTT + 内存分级限制缓冲上限，避免大内存/高 RTT 直接顶到内核 cap"
+  echo -e "  - 高延迟窗口缩放采用渐进抬升曲线，减少中高 RTT 场景过早打满 adv_win_scale"
   echo -e "  - 自动联动生成缓冲、队列、窗口、邻居阈值、limits/systemd"
   echo ""
   pause_for_enter
@@ -2877,7 +2879,7 @@ else:
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
-    adv_component = clamp(latency_factor / (latency_tolerance * (2.8 - 0.7 * latency_ramp)) * adv_factor * (win_base * (0.32 + 0.18 * latency_ramp)) * ((0.75 + 0.35 * latency_ramp) * curve1 + (0.42 + 0.18 * latency_ramp)), 2, max(4, math.ceil(win_max - (5 - 2 * latency_ramp))))
+    adv_component = clamp(latency_factor / (latency_tolerance * (3.0 - 0.9 * latency_ramp)) * adv_factor * (win_base * (0.26 + 0.14 * latency_ramp)) * ((0.62 + 0.26 * latency_ramp) * curve1 + (0.34 + 0.12 * latency_ramp)), 1.5, max(3, math.ceil(win_max - (5.5 - 2.5 * latency_ramp))))
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor; Q = clamp(1.5 * F, 3, 6)
     elif mem <= 1024:

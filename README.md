@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.7.6-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.7.7-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.7.6</b>
+  <b>当前版本：v1.7.7</b>
 </p>
 
 ---
@@ -164,6 +164,9 @@ VPS Box 适合以下几类用户：
 - SSH 端口与 SSH 密钥管理
 - Swap 管理
 - TCP 网络优化与 BBR 管理
+  - 内置动态 TCP 画像生成：按本地带宽 / 服务器带宽 / RTT / 内存自动选参
+  - 高延迟画像带缓冲上限与窗口缩放抑制，避免中高 RTT 过早顶满 `tcp_adv_win_scale` 或 `rmem_max`
+  - 生成后会写入 sysctl / limits / systemd 配置，并可直接查看当前画像
 - Docker 安装
 - Fail2Ban 防暴力破解
 - Cloudflare WARP
