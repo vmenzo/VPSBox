@@ -645,11 +645,28 @@ _pkg_remove() {
 }
 
 _run_remote_bash() {
-  local url="$1" tmp rc
+  local url="$1" tmp rc first_line
   shift
   tmp=$(mktemp) || return 1
   if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp"; then
     rm -f "$tmp"
+    echo -e "${RED}[错误] 远程脚本下载失败: $url${NC}"
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 远程脚本内容为空: $url${NC}"
+    return 1
+  fi
+  first_line=$(head -n 1 "$tmp" 2>/dev/null || true)
+  if grep -qiE '<(html|!doctype html)' "$tmp"; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 下载到的内容看起来像 HTML 页面，已拒绝执行: $url${NC}"
+    return 1
+  fi
+  if [[ "$first_line" != '#!'* ]] && ! grep -qE '(^|[[:space:]])(bash|sh)[[:space:]]' "$tmp"; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 下载内容不像可执行 shell 脚本，已拒绝执行: $url${NC}"
     return 1
   fi
   bash "$tmp" "$@"
@@ -2297,8 +2314,10 @@ read -r -p "> 请输入编号 (0取消): " n_res_opt
 n_res_opt="${n_res_opt// /}"
 if [ "$n_res_opt" == "0" ]; then continue; fi
 if [[ "$n_res_opt" =~ ^[0-9]+$ ]] && [ "$n_res_opt" -ge 1 ] && [ "$n_res_opt" -le "${#n_backups[@]}" ]; then
-if ! confirm_action "还原此备份 (当前配置将被覆盖，且服务会在后台重启)" "n"; then continue; fi
+if ! confirm_action "还原此备份 (当前配置将被覆盖，并尝试热重载服务)" "n"; then continue; fi
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
+local restore_notes=()
+local restore_failed=0
 if [ -d "$sel_bk/xray_nodes.d" ]; then
   rm -rf "$XRAY_NODES_DIR" && cp -r "$sel_bk/xray_nodes.d" "$XRAY_NODES_DIR"
 fi
@@ -2313,12 +2332,46 @@ if [ -f "$sel_bk/singbox_nodes_meta.json" ]; then
 fi
 [ -f "$sel_bk/xray_config.json" ] && cp "$sel_bk/xray_config.json" "$XRAY_CONFIG_FILE"
 [ -f "$sel_bk/singbox_config.json" ] && cp "$sel_bk/singbox_config.json" "$SINGBOX_CONFIG_FILE"
-rebuild_core_config "Xray" >/dev/null 2>&1 || true
-rebuild_core_config "Sing-box" >/dev/null 2>&1 || true
-_reload_core_without_disconnect "Xray" >/dev/null 2>&1 || true
-_reload_core_without_disconnect "Sing-box" >/dev/null 2>&1 || true
+
+if [ -d "$XRAY_NODES_DIR" ] || [ -f "$XRAY_CONFIG_FILE" ]; then
+  if rebuild_core_config "Xray" >/dev/null 2>&1; then
+    if _reload_core_without_disconnect "Xray" >/dev/null 2>&1; then
+      restore_notes+=("Xray: 已恢复并热重载成功")
+    else
+      restore_notes+=("Xray: 配置已恢复，但热重载失败")
+      restore_failed=1
+    fi
+  else
+    restore_notes+=("Xray: 配置重建失败")
+    restore_failed=1
+  fi
+fi
+
+if [ -d "$SINGBOX_NODES_DIR" ] || [ -f "$SINGBOX_CONFIG_FILE" ]; then
+  if rebuild_core_config "Sing-box" >/dev/null 2>&1; then
+    if _reload_core_without_disconnect "Sing-box" >/dev/null 2>&1; then
+      restore_notes+=("Sing-box: 已恢复并热重载成功")
+    else
+      restore_notes+=("Sing-box: 配置已恢复，但热重载失败")
+      restore_failed=1
+    fi
+  else
+    restore_notes+=("Sing-box: 配置重建失败")
+    restore_failed=1
+  fi
+fi
+
 [ -f "$sel_bk/vpsbox_nodes.txt" ] && cp "$sel_bk/vpsbox_nodes.txt" "$NODE_RECORD_FILE"
-echo -e "\n${GREEN}[成功] 节点配置已成功还原！服务已尝试无感热重载。${NC}"; pause_for_enter
+
+if [ ${#restore_notes[@]} -gt 0 ]; then
+  echo ""
+  printf '  - %s\n' "${restore_notes[@]}"
+fi
+if [ "$restore_failed" -eq 0 ]; then
+  echo -e "\n${GREEN}[成功] 节点配置已还原，相关服务热重载成功。${NC}"; pause_for_enter
+else
+  echo -e "\n${YELLOW}[警告] 节点文件已还原，但部分核心的重建或热重载失败，请按上方结果检查。${NC}"; pause_for_enter
+fi
 else
 echo -e "${RED}[错误] 输入无效编号！${NC}"; sleep 1
 fi
