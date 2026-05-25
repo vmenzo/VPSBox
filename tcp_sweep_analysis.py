@@ -235,11 +235,12 @@ def profile(local_bw, vps_bw, latency, mem, ramp):
             W = min(W, medium_cap)
     curve1 = clamp((math.log(ramp * (math.e - 1) + 1) / math.log(math.e)) * stability * (buffer_aggression / 2), 0.5, 3)
     latency_input = min(1, (latency - 120) / 1880)
+    latency_ramp = clamp((latency - 120) / 680, 0, 1)
     latency_factor = clamp((math.log(latency_input * (latency_curve_tolerance - 1) + 1) / math.log(latency_curve_tolerance)) * latency_tolerance * curve1 if latency_input > 0 else 0, 1, 8)
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
-    adv_component = clamp(latency_factor / (latency_tolerance * 2.4) * adv_factor * (win_base * 0.44) * (0.95 * curve1 + 0.5), 2, max(4, win_max - 5))
+    adv_component = clamp(latency_factor / (latency_tolerance * (2.8 - 0.7 * latency_ramp)) * adv_factor * (win_base * (0.32 + 0.18 * latency_ramp)) * ((0.75 + 0.35 * latency_ramp) * curve1 + (0.42 + 0.18 * latency_ramp)), 2, max(4, math.ceil(win_max - (5 - 2 * latency_ramp))))
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor
         Q = clamp(1.5 * F, 3, 6)

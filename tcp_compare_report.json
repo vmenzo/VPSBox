@@ -128,7 +128,7 @@
         "net.core.wmem_max": 18991967,
         "net.ipv4.tcp_rmem": "32768 262144 18991967",
         "net.ipv4.tcp_wmem": "32768 262144 18991967",
-        "net.ipv4.tcp_adv_win_scale": 13,
+        "net.ipv4.tcp_adv_win_scale": 9,
         "net.core.somaxconn": 2560,
         "net.core.netdev_max_backlog": 8192
       }
@@ -157,7 +157,7 @@
         "net.core.wmem_max": 91750400,
         "net.ipv4.tcp_rmem": "32768 262144 91750400",
         "net.ipv4.tcp_wmem": "32768 262144 91750400",
-        "net.ipv4.tcp_adv_win_scale": 29,
+        "net.ipv4.tcp_adv_win_scale": 22,
         "net.core.somaxconn": 2560,
         "net.core.netdev_max_backlog": 8192
       }
@@ -186,7 +186,7 @@
         "net.core.wmem_max": 33158884,
         "net.ipv4.tcp_rmem": "32768 262144 33158884",
         "net.ipv4.tcp_wmem": "32768 262144 33158884",
-        "net.ipv4.tcp_adv_win_scale": 20,
+        "net.ipv4.tcp_adv_win_scale": 30,
         "net.core.somaxconn": 2560,
         "net.core.netdev_max_backlog": 8192
       }
