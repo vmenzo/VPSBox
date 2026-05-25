@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.2 — 节点部署回滚、证书校验与热重载安全性修复
+# 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.2"
+VPSBOX_VERSION="v1.7.3"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -575,7 +575,13 @@ persist_node_runtime() {
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     return 1
   fi
-  _node_meta_upsert "$core_name" "$port" "$label" "$link" "$fragment_file" "$protocol" || return 1
+  if ! _node_meta_upsert "$core_name" "$port" "$label" "$link" "$fragment_file" "$protocol"; then
+    echo -e "${RED}[错误] 节点元数据写入失败，正在回滚本次节点变更。${NC}"
+    rm -f "$fragment_file"
+    rebuild_core_config "$core_name" >/dev/null 2>&1 || true
+    _reload_core_without_disconnect "$core_name" >/dev/null 2>&1 || true
+    return 1
+  fi
   return 0
 }
 
@@ -584,6 +590,7 @@ remove_node_runtime() {
   local meta_file fragment_file node_dir backup_fragment
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
+  _ensure_node_meta_file "$meta_file"
   fragment_file=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
   if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
     shopt -s nullglob
@@ -823,15 +830,20 @@ if [ -s ~/.ssh/authorized_keys ]; then
 echo -e "\n${YELLOW}[发现] 系统中已存在其他 SSH 密钥记录。${NC}"
 read -r -p "> 是否清空旧密钥并覆盖？(y-覆盖清空 / n-保留追加, 默认 n): " overwrite_opt
 overwrite_opt="${overwrite_opt// /}"
-if [[ "$overwrite_opt" =~ ^[yY]$ ]]; then > ~/.ssh/authorized_keys; echo -e "${CYAN}>>> 已清空历史废弃密钥。${NC}"; fi
+if [[ "$overwrite_opt" =~ ^[yY]$ ]]; then : > ~/.ssh/authorized_keys; echo -e "${CYAN}>>> 已清空历史废弃密钥。${NC}"; fi
 fi
 echo "$pub_key" >> ~/.ssh/authorized_keys
-if [ $? -ne 0 ]; then echo -e "\n${RED}[错误] 写入密钥失败，请检查系统权限或磁盘空间。${NC}"; else chmod 600 ~/.ssh/authorized_keys; echo -e "\n${GREEN}[成功] 密钥已成功添加！请先测试使用密钥登录，再关闭密码登录功能。${NC}"; fi
+if [ $? -ne 0 ]; then
+  echo -e "\n${RED}[错误] 写入密钥失败，请检查系统权限或磁盘空间。${NC}"
+else
+  chmod 600 ~/.ssh/authorized_keys
+  echo -e "\n${GREEN}[成功] 密钥已成功添加！请先测试使用密钥登录，再关闭密码登录功能。${NC}"
+fi
 pause_for_enter; break
 done ;;
 2)
 if ! confirm_action "删除系统中所有的 SSH 公钥" "n"; then continue; fi
-> ~/.ssh/authorized_keys
+: > ~/.ssh/authorized_keys
 if [ $? -eq 0 ]; then echo -e "\n${GREEN}[成功] 所有 SSH 公钥已彻底清空！${NC}"; else echo -e "\n${RED}[错误] 清空密钥失败！${NC}"; fi
 pause_for_enter ;;
 3)
@@ -1974,7 +1986,7 @@ NEED_BACKUP="${NEED_BACKUP// /}"
 
 echo -e "\n${CYAN}>>> 正在运行 VPS Box 自研引擎计算并安全注入配置...${NC}"
 
-> "$CUSTOM_CONF"
+: > "$CUSTOM_CONF"
 
 TUNING_VARS=$(awk -v lb="$local_bw" -v sb="$server_bw" -v lat="$latency" \
 -v mem="$w_ram" -v ramp="$ramp_up" -v bbr="$bbr_ver" -v qd="$qdisc" '
@@ -3152,7 +3164,7 @@ case $dm_opt in
   [ -z "$_fstype" ] && echo -e "${RED}无法获取文件系统类型！${NC}" && sleep 2 && continue
   mkdir -p "$_mnt"
   if mount "$_dev" "$_mnt"; then
-    if ! grep -qE "UUID=$_uuid|[[:space:]]$_mnt[[:space:]]" /etc/fstab; then
+    if ! grep -qE "UUID=$_uuid|[[:space:]]${_mnt}[[:space:]]" /etc/fstab; then
       echo "UUID=$_uuid $_mnt $_fstype defaults,nofail 0 2" >> /etc/fstab
     fi
     echo -e "${GREEN}[成功] 已挂载 $_dev → $_mnt（已写入 fstab）${NC}"
