@@ -1455,193 +1455,354 @@ _bbr_collect_dynamic_inputs() {
 
 _bbr_generate_dynamic_profile() {
   local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
-  local local_bw="$BBR_TUNE_LOCAL_BW" vps_bw="$BBR_TUNE_VPS_BW" latency="$BBR_TUNE_LATENCY" mem_mb="$BBR_TUNE_MEMORY_MB" cc="$BBR_TUNE_CC" ecn="$BBR_TUNE_ECN"
-  local qdisc mode
-  local sqrt_ratio factor_x1024 throughput_bps bdp minfree
-  local rmem_default wmem_default optmem_max somaxconn netdev_max_backlog max_syn_backlog max_orphans
-  local tcp_rmem_min tcp_rmem_def tcp_rmem_max tcp_wmem_min tcp_wmem_def tcp_wmem_max
-  local gc1 gc2 gc3 fack no_metrics syn_retries synack_retries notsent_lowat adv_win_scale swappiness dirty_ratio dirty_bg_ratio
+  mkdir -p /etc/systemd/system.conf.d /etc/security/limits.d /etc/sysctl.d
 
-  if (( latency <= 120 )); then
-    mode="低延迟画像"
-    qdisc="cake"
-    sqrt_ratio=$(_bbr_int_sqrt $(( (local_bw * 1000) / (vps_bw > 0 ? vps_bw : 1) )))
-    factor_x1024=$(( 1536 * sqrt_ratio / 31 ))
-    (( factor_x1024 < 1024 )) && factor_x1024=1024
-    (( factor_x1024 > 2048 )) && factor_x1024=2048
-    throughput_bps=$(( ((local_bw * factor_x1024 / 1024) < vps_bw ? (local_bw * factor_x1024 / 1024) : vps_bw) * 131072 ))
-    bdp=$(_bbr_ceil_div $(( throughput_bps * latency )) 1000)
-    (( bdp < 24576 )) && bdp=24576
-    tcp_rmem_min=8192
-    tcp_rmem_def=87380
-    tcp_wmem_min=8192
-    tcp_wmem_def=65536
-    rmem_default=87380
-    wmem_default=65536
-    tcp_rmem_max=$(( bdp * (mem_mb <= 256 ? 5 : mem_mb <= 512 ? 6 : 8) / 2 ))
-    tcp_wmem_max=$(( bdp * (mem_mb <= 256 ? 12 : mem_mb <= 512 ? 15 : 20) / 10 ))
-    tcp_rmem_max=$(_bbr_clamp "$tcp_rmem_max" 4194304 33554432)
-    tcp_wmem_max=$(_bbr_clamp "$tcp_wmem_max" 2097152 33554432)
-    optmem_max=$(_bbr_clamp $(( bdp / 4 )) 16384 65536)
-    somaxconn=$(_bbr_clamp $(( throughput_bps / 262144 )) 256 2048)
-    netdev_max_backlog=$(_bbr_clamp $(( throughput_bps / 131072 )) 2000 4000)
-    max_syn_backlog=$(_bbr_clamp $(( throughput_bps / 65536 )) 2048 16384)
-    max_orphans=65536
-    gc1=1024; gc2=4096; gc3=8192
-    fack=0
-    no_metrics=0
-    syn_retries=3
-    synack_retries=2
-    notsent_lowat=4096
-    adv_win_scale=2
-    swappiness=10
-    dirty_ratio=10
-    dirty_bg_ratio=5
-    minfree=$(( mem_mb * (mem_mb <= 256 ? 15 : mem_mb <= 512 ? 20 : mem_mb <= 1024 ? 25 : 30) + throughput_bps / 2048 ))
-    minfree=$(_bbr_clamp "$minfree" 32768 1048576)
-  else
-    mode="高延迟画像"
-    qdisc="fq"
-    sqrt_ratio=$(_bbr_int_sqrt $(( (local_bw * 1000) / (vps_bw > 0 ? vps_bw : 1) )))
-    factor_x1024=$(( (2048 * latency / 40) * sqrt_ratio / 31 ))
-    (( factor_x1024 < 1536 )) && factor_x1024=1536
-    (( factor_x1024 > 5120 )) && factor_x1024=5120
-    local scaled_vps=$(( vps_bw * 2 ))
-    local scaled_local=$(( local_bw * factor_x1024 / 1024 ))
-    throughput_bps=$(( (scaled_local < scaled_vps ? scaled_local : scaled_vps) * 131072 ))
-    bdp=$(_bbr_ceil_div $(( throughput_bps * latency )) 1000)
-    (( bdp < 131072 )) && bdp=131072
-    tcp_rmem_min=32768
-    tcp_rmem_def=262144
-    tcp_wmem_min=32768
-    tcp_wmem_def=262144
-    rmem_default=262144
-    wmem_default=262144
-    tcp_rmem_max=$(( bdp * (mem_mb <= 512 ? 6 : mem_mb <= 1024 ? 8 : 10) ))
-    tcp_wmem_max=$(( bdp * (mem_mb <= 512 ? 5 : mem_mb <= 1024 ? 8 : 10) ))
-    tcp_rmem_max=$(_bbr_clamp "$tcp_rmem_max" 8388608 67108864)
-    tcp_wmem_max=$(_bbr_clamp "$tcp_wmem_max" 4194304 67108864)
-    optmem_max=$(_bbr_clamp $(( bdp / 2 )) 65536 262144)
-    somaxconn=$(_bbr_clamp $(( throughput_bps / 52428 )) 2560 $(( mem_mb <= 512 ? 8192 : 16384 )))
-    netdev_max_backlog=$(_bbr_clamp $(( throughput_bps / 26214 )) 8192 $(( mem_mb <= 512 ? 16384 : 32768 )))
-    max_syn_backlog=$(_bbr_clamp $(( throughput_bps / 13107 )) 8192 $(( mem_mb <= 512 ? 32768 : 65536 )))
-    max_orphans=$(( mem_mb <= 256 ? 16384 : 32768 ))
-    gc1=$(( mem_mb <= 512 ? 256 : 512 ))
-    gc2=$(( mem_mb <= 512 ? 1024 : 2048 ))
-    gc3=$(( mem_mb <= 512 ? 2048 : 4096 ))
-    fack=1
-    no_metrics=1
-    syn_retries=2
-    synack_retries=2
-    notsent_lowat=$(_bbr_clamp $(( bdp / 2 )) 4096 524288)
-    adv_win_scale=$(_bbr_clamp $(( latency / 60 )) 2 $(( mem_mb <= 512 ? 6 : mem_mb <= 1024 ? 8 : mem_mb <= 2048 ? 12 : 16 )))
-    swappiness=5
-    dirty_ratio=5
-    dirty_bg_ratio=2
-    minfree=$(( mem_mb * (mem_mb <= 512 ? 20 : mem_mb <= 1024 ? 25 : mem_mb <= 2048 ? 30 : 35) + throughput_bps / 1706 ))
-    minfree=$(_bbr_clamp "$minfree" 65536 1048576)
-  fi
+  local local_bw="$BBR_TUNE_LOCAL_BW" vps_bw="$BBR_TUNE_VPS_BW" latency="$BBR_TUNE_LATENCY" mem_mb="$BBR_TUNE_MEMORY_MB" cc="$BBR_TUNE_CC" ecn="$BBR_TUNE_ECN" ramp="$BBR_TUNE_RAMP"
+  local json
+  json=$(python3 - <<'PY'
+import json, math, os
 
-  if (( mem_mb <= 256 )); then
-    echo "* soft nofile 1048576" > /etc/security/limits.d/99-vpsbox-tcp.conf
-    echo "* hard nofile 1048576" >> /etc/security/limits.d/99-vpsbox-tcp.conf
-    echo "DefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
-    echo "DefaultLimitNPROC=65535" >> /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
-  else
-    echo "* soft nofile 1048576" > /etc/security/limits.d/99-vpsbox-tcp.conf
-    echo "* hard nofile 1048576" >> /etc/security/limits.d/99-vpsbox-tcp.conf
-    echo "DefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
-    echo "DefaultLimitNPROC=65535" >> /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
-  fi
-  mkdir -p /etc/systemd/system.conf.d /etc/security/limits.d
+def clamp(x, lo, hi):
+    return min(max(x, lo), hi)
 
-  cat > "$conf" <<EOF
-# VPSBox Dynamic TCP Profile
-# Mode: $mode
-# Input: local=${local_bw}Mbps vps=${vps_bw}Mbps rtt=${latency}ms mem=${mem_mb}MB cc=${cc} ecn=${ecn}
-kernel.pid_max = 65535
-kernel.panic = 1
-kernel.sysrq = 1
-kernel.core_pattern = core_%e
-kernel.printk = 3 4 1 3
-kernel.numa_balancing = 0
-kernel.sched_autogroup_enabled = 0
+def ceildiv(a, b):
+    return (a + b - 1) // b
 
-vm.swappiness = $swappiness
-vm.dirty_ratio = $dirty_ratio
-vm.dirty_background_ratio = $dirty_bg_ratio
-vm.panic_on_oom = 1
-vm.overcommit_memory = 1
-vm.min_free_kbytes = $minfree
-vm.vfs_cache_pressure = 100
-vm.dirty_expire_centisecs = 3000
-vm.dirty_writeback_centisecs = 500
+def sigmoid(x, steepness=4.0, midpoint=0.3):
+    return 1.0 / (1.0 + math.exp(-steepness * (x - midpoint)))
 
-net.core.default_qdisc = $qdisc
-net.core.netdev_max_backlog = $netdev_max_backlog
-net.core.rmem_max = $tcp_rmem_max
-net.core.wmem_max = $tcp_wmem_max
-net.core.rmem_default = $rmem_default
-net.core.wmem_default = $wmem_default
-net.core.somaxconn = $somaxconn
-net.core.optmem_max = $optmem_max
+def piecewise(x, points):
+    if x <= points[0][0]:
+        return points[0][1]
+    for i in range(1, len(points)):
+        x0, y0 = points[i-1]
+        x1, y1 = points[i]
+        if x <= x1:
+            if x1 == x0:
+                return y1
+            return y0 + (y1-y0) * ((x-x0)/(x1-x0))
+    return points[-1][1]
 
-net.ipv4.tcp_fastopen = 3
-net.ipv4.tcp_timestamps = 1
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_fin_timeout = 10
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_max_tw_buckets = 32768
-net.ipv4.tcp_sack = 1
-net.ipv4.tcp_fack = $fack
-net.ipv4.tcp_rmem = $tcp_rmem_min $tcp_rmem_def $tcp_rmem_max
-net.ipv4.tcp_wmem = $tcp_wmem_min $tcp_wmem_def $tcp_wmem_max
-net.ipv4.tcp_mtu_probing = 1
-net.ipv4.tcp_congestion_control = $cc
-net.ipv4.tcp_notsent_lowat = $notsent_lowat
-net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = $adv_win_scale
-net.ipv4.tcp_moderate_rcvbuf = 1
-net.ipv4.tcp_no_metrics_save = $no_metrics
-net.ipv4.tcp_max_syn_backlog = $max_syn_backlog
-net.ipv4.tcp_max_orphans = $max_orphans
-net.ipv4.tcp_synack_retries = $synack_retries
-net.ipv4.tcp_syn_retries = $syn_retries
-net.ipv4.tcp_abort_on_overflow = 0
-net.ipv4.tcp_stdurg = 0
-net.ipv4.tcp_rfc1337 = 0
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_ecn = $ecn
+def qtheory(e, service, utilization):
+    return service / (1 - min(utilization, 0.95)) * e
 
-net.ipv4.ip_forward = 0
-net.ipv4.ip_local_port_range = 1024 65535
-net.ipv4.ip_no_pmtu_disc = 0
-net.ipv4.route.gc_timeout = 100
-net.ipv4.neigh.default.gc_stale_time = 120
-net.ipv4.neigh.default.gc_thresh1 = $gc1
-net.ipv4.neigh.default.gc_thresh2 = $gc2
-net.ipv4.neigh.default.gc_thresh3 = $gc3
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.default.secure_redirects = 0
-net.ipv4.conf.all.accept_source_route = 0
-net.ipv4.conf.default.accept_source_route = 0
-net.ipv4.conf.all.forwarding = 0
-net.ipv4.conf.default.forwarding = 0
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.arp_announce = 2
-net.ipv4.conf.default.arp_announce = 2
-net.ipv4.conf.all.arp_ignore = 1
-net.ipv4.conf.default.arp_ignore = 1
-EOF
+def tcpcong(x, mode, scale):
+    if mode == 'slow_start':
+        return min(scale * (1 + 0.5 * x), scale + 10 * x)
+    return scale + 0.1 * x
+
+def memory_cap(target, mem_mb, frac):
+    return min(target, int(1024 * mem_mb * 1024 * frac))
+
+local_bw = int(os.environ['LOCAL_BW'])
+vps_bw = int(os.environ['VPS_BW'])
+latency = int(os.environ['LATENCY'])
+mem = int(os.environ['MEM_MB'])
+ramp = float(os.environ['RAMP'])
+cc = os.environ['CC']
+ecn = int(os.environ['ECN'])
+
+base = {
+    'kernel.pid_max': 65535,
+    'kernel.panic': 1,
+    'kernel.sysrq': 1,
+    'kernel.core_pattern': 'core_%e',
+    'kernel.printk': '3 4 1 3',
+    'kernel.numa_balancing': 0,
+    'kernel.sched_autogroup_enabled': 0,
+    'vm.panic_on_oom': 1,
+    'vm.overcommit_memory': 1,
+    'vm.vfs_cache_pressure': 100,
+    'vm.dirty_expire_centisecs': 3000,
+    'vm.dirty_writeback_centisecs': 500,
+    'net.ipv4.tcp_fastopen': 3,
+    'net.ipv4.tcp_timestamps': 1,
+    'net.ipv4.tcp_tw_reuse': 1,
+    'net.ipv4.tcp_fin_timeout': 10,
+    'net.ipv4.tcp_slow_start_after_idle': 0,
+    'net.ipv4.tcp_max_tw_buckets': 32768,
+    'net.ipv4.tcp_sack': 1,
+    'net.ipv4.tcp_mtu_probing': 1,
+    'net.ipv4.tcp_congestion_control': cc,
+    'net.ipv4.tcp_window_scaling': 1,
+    'net.ipv4.tcp_moderate_rcvbuf': 1,
+    'net.ipv4.tcp_abort_on_overflow': 0,
+    'net.ipv4.tcp_stdurg': 0,
+    'net.ipv4.tcp_rfc1337': 0,
+    'net.ipv4.tcp_syncookies': 1,
+    'net.ipv4.tcp_ecn': ecn,
+    'net.ipv4.ip_forward': 0,
+    'net.ipv4.ip_local_port_range': '1024 65535',
+    'net.ipv4.ip_no_pmtu_disc': 0,
+    'net.ipv4.route.gc_timeout': 100,
+    'net.ipv4.neigh.default.gc_stale_time': 120,
+    'net.ipv4.conf.all.accept_redirects': 0,
+    'net.ipv4.conf.default.accept_redirects': 0,
+    'net.ipv4.conf.all.secure_redirects': 0,
+    'net.ipv4.conf.default.secure_redirects': 0,
+    'net.ipv4.conf.all.accept_source_route': 0,
+    'net.ipv4.conf.default.accept_source_route': 0,
+    'net.ipv4.conf.all.forwarding': 0,
+    'net.ipv4.conf.default.forwarding': 0,
+    'net.ipv4.conf.all.rp_filter': 1,
+    'net.ipv4.conf.default.rp_filter': 1,
+    'net.ipv4.conf.all.arp_announce': 2,
+    'net.ipv4.conf.default.arp_announce': 2,
+    'net.ipv4.conf.all.arp_ignore': 1,
+    'net.ipv4.conf.default.arp_ignore': 1,
+}
+
+if latency <= 120:
+    mode = '低延迟画像'
+    qdisc = 'cake'
+    responsiveness = 2.0
+    jitter_tolerance = 0.3
+    burst_handling = 0.7
+    memory_efficiency = 1.0
+    buffer_aggression = 0.8
+    queue_pref = 0.8
+    conn_density = 1.2
+    win_base = 1.2
+    latency_sensitivity = 1.5
+    win_max = 4
+    if mem <= 256:
+        responsiveness = 2.5
+        jitter_tolerance = 0.2
+        burst_handling = 0.5
+        memory_efficiency = 0.8
+        buffer_aggression = 0.6
+        queue_pref = 0.6
+        conn_density = 1.0
+        win_base = 1.0
+        win_max = 3
+    elif mem <= 512:
+        responsiveness = 2.2
+        jitter_tolerance = 0.25
+        burst_handling = 0.6
+        memory_efficiency = 0.9
+        buffer_aggression = 0.7
+    elif mem > 1024:
+        responsiveness = 1.8
+        jitter_tolerance = 0.4
+        burst_handling = 0.9
+        memory_efficiency = 1.2
+        buffer_aggression = 1.0
+        queue_pref = 1.0
+        conn_density = 1.5
+        win_base = 1.4
+        win_max = 6
+
+    F = clamp(1.5 * math.sqrt(local_bw / vps_bw), 1, 2)
+    T = math.floor(1024 * min(local_bw * F, vps_bw) * 1024 / 8)
+    ratio = local_bw / vps_bw
+    B = 1.0
+    if ratio > 1:
+        B = max(0.3, 1 / math.sqrt(min(ratio, 100)))
+        if latency > 200:
+            B = min(1.0, 1.2 * B)
+    N = math.ceil(T * latency / 1000)
+    P = max(N, 24576)
+    A = 0.1 if mem <= 256 else 0.125
+    I = 4194304 if mem <= 256 else 8388608
+    U = max(memory_cap(math.ceil(1.5 * ramp * B * N), mem, A), I)
+
+    curve1 = clamp(sigmoid(ramp, 4, 0.3) * (responsiveness / 2), 0.3, 2)
+    latency_factor = clamp((2 ** (latency / 120 - 1)) * curve1 * responsiveness, 0.8, 5)
+    buffer_factor = clamp(latency_factor * tcpcong(curve1, 'slow_start', 1) * memory_efficiency * buffer_aggression * burst_handling, 0.5, 3)
+    queue_factor = clamp((math.log(qtheory(T / 65536 * conn_density, latency / 1000 * 2, 0.8 * curve1) + 1) / math.log(1000)) * queue_pref * (1 + jitter_tolerance), 0.3, 2)
+    adv_factor = max(0, math.ceil(math.log2(max(1, 2 * math.ceil(T * latency / 1000) / 65535))))
+    adv_win_scale = max(2, math.ceil(clamp(latency_factor / latency_sensitivity * adv_factor * win_base * curve1, 1, win_max)))
+
+    Vmul = 2.5 if mem <= 256 else 3 if mem <= 512 else 4
+    Hmul = 1.2 if mem <= 256 else 1.5 if mem <= 1024 else 2
+    tcp_rmem_max = min(math.floor(P * Vmul * buffer_factor), U)
+    tcp_wmem_max = min(math.floor(P * Hmul * buffer_factor), U)
+    Q = math.ceil(min(2 * max(100, T / 65536), 10000) * queue_factor)
+    X = 0.6 if mem <= 256 else 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.2
+    somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
+    backlog = int(clamp(math.floor(0.4 * Q * X), 2000, 4000))
+    max_syn = int(clamp(math.floor(0.8 * Q * X), 2048, 16384))
+    min_free = int(clamp(math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03)) + math.floor(0.5 * math.ceil(T / 1024)), 32768, 1048576))
+
+    data = {
+        **base,
+        'mode': mode,
+        'net.core.default_qdisc': qdisc,
+        'vm.swappiness': 10,
+        'vm.dirty_ratio': 10,
+        'vm.dirty_background_ratio': 5,
+        'vm.min_free_kbytes': min_free,
+        'net.core.netdev_max_backlog': backlog,
+        'net.core.rmem_max': U,
+        'net.core.wmem_max': U,
+        'net.core.rmem_default': 87380,
+        'net.core.wmem_default': 65536,
+        'net.core.somaxconn': somaxconn,
+        'net.core.optmem_max': math.floor(min(65536, P / 4)),
+        'net.ipv4.tcp_fack': 0,
+        'net.ipv4.tcp_rmem': f'8192 87380 {tcp_rmem_max}',
+        'net.ipv4.tcp_wmem': f'8192 65536 {tcp_wmem_max}',
+        'net.ipv4.tcp_notsent_lowat': 4096,
+        'net.ipv4.tcp_adv_win_scale': adv_win_scale,
+        'net.ipv4.tcp_no_metrics_save': 0,
+        'net.ipv4.tcp_max_syn_backlog': max_syn,
+        'net.ipv4.tcp_max_orphans': 65536,
+        'net.ipv4.tcp_synack_retries': 2,
+        'net.ipv4.tcp_syn_retries': 3,
+        'net.ipv4.neigh.default.gc_thresh1': 1024,
+        'net.ipv4.neigh.default.gc_thresh2': 4096,
+        'net.ipv4.neigh.default.gc_thresh3': 8192,
+    }
+else:
+    mode = '高延迟画像'
+    qdisc = 'fq'
+    throughput_priority = 2.0
+    stability = 1.5
+    buffer_aggression = 2.0
+    queue_depth = 2.5
+    conn_scaling = 2.0
+    memory_util = 1.5
+    win_base = 2.0
+    latency_tolerance = 2.0
+    win_max = 8
+    latency_curve_tolerance = 1.5
+    if mem <= 512:
+        throughput_priority = 1.8
+        stability = 1.8
+        buffer_aggression = 1.5
+        queue_depth = 2.0
+        conn_scaling = 1.5
+        memory_util = 1.2
+        win_base = 1.5
+        win_max = 6
+    elif mem <= 2048 and mem > 1024:
+        throughput_priority = 2.2
+        buffer_aggression = 2.3
+        queue_depth = 3.0
+        conn_scaling = 2.5
+        memory_util = 1.8
+        win_base = 2.5
+        win_max = 12
+    elif mem > 2048:
+        throughput_priority = 2.5
+        buffer_aggression = 2.5
+        queue_depth = 3.5
+        conn_scaling = 3.0
+        memory_util = 2.0
+        win_base = 3.0
+        win_max = 16
+
+    F = clamp(latency / 40, 1, 5)
+    T = clamp(2 * math.sqrt(local_bw / vps_bw) * F, 1.5, 5)
+    S = math.floor(1024 * min(local_bw * T, 2 * vps_bw) * 1024 / 8)
+    ratio = local_bw / vps_bw
+    Ndamp = 1.0
+    if ratio > 100: Ndamp = 0.06
+    elif ratio > 50: Ndamp = 0.12
+    elif ratio > 20: Ndamp = 0.2
+    elif ratio > 10: Ndamp = 0.3
+    elif ratio > 5: Ndamp = 0.5
+    elif ratio > 2: Ndamp = 0.7
+
+    G = math.ceil(S * latency / 1000)
+    if mem <= 512:
+        L = max(max(G, 131072), S * latency / 1200)
+    elif mem <= 1024:
+        L = max(max(G, 262144), S * latency / 1000)
+    else:
+        L = max(max(G, 524288), S * latency / 800)
+    V = math.ceil(S * latency / 1000)
+    H = memory_cap(math.ceil(2 * ramp * Ndamp * V), mem, 0.125)
+    W = max(H, math.ceil(0.5 * V)) if latency > 500 else H
+
+    curve1 = clamp((math.log(ramp * (math.e - 1) + 1) / math.log(math.e)) * stability * (buffer_aggression / 2), 0.5, 3)
+    latency_input = min(1, (latency - 120) / 1880)
+    latency_factor = clamp((math.log(latency_input * (latency_curve_tolerance - 1) + 1) / math.log(latency_curve_tolerance)) * latency_tolerance * curve1 if latency_input > 0 else 0, 1, 8)
+    buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
+    queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
+    adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
+    adv_component = clamp(latency_factor / latency_tolerance * adv_factor * win_base * (2 * curve1 + 1), 2, win_max)
+    if mem <= 512:
+        K = clamp(1.5 * F, 3, 6) * buffer_factor
+        Q = clamp(1.5 * F, 3, 6)
+    elif mem <= 1024:
+        K = clamp(1.8 * F, 4, 8) * buffer_factor
+        Q = clamp(1.8 * F, 4, 8)
+    else:
+        K = clamp(2 * F, 5, 10) * buffer_factor
+        Q = clamp(2 * F, 5, 10)
+    tcp_rmem_max = min(math.floor(L * Q), W)
+    tcp_wmem_max = min(math.floor(L * K), W)
+    J = math.ceil(min(3 * max(50, S / 131072), 20000) * queue_factor)
+    Z = 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.3 if mem <= 2048 else 1.5
+    somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
+    backlog = int(clamp(math.floor(0.3 * J * Z), 8192, 16384 if mem <= 512 else 32768))
+    max_syn = int(clamp(math.floor(0.6 * J * Z), 8192, 32768 if mem <= 512 else 65536))
+    min_free = int(clamp(math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035)) + math.floor(0.6 * math.ceil(S / 1024)), 65536, 1048576))
+    data = {
+        **base,
+        'mode': mode,
+        'net.core.default_qdisc': qdisc,
+        'vm.swappiness': 5,
+        'vm.dirty_ratio': 5,
+        'vm.dirty_background_ratio': 2,
+        'vm.min_free_kbytes': min_free,
+        'net.core.netdev_max_backlog': backlog,
+        'net.core.rmem_max': W,
+        'net.core.wmem_max': W,
+        'net.core.rmem_default': 262144,
+        'net.core.wmem_default': 262144,
+        'net.core.somaxconn': somaxconn,
+        'net.core.optmem_max': math.floor(min(262144, L / 2)),
+        'net.ipv4.tcp_fack': 1,
+        'net.ipv4.tcp_rmem': f'32768 262144 {tcp_rmem_max}',
+        'net.ipv4.tcp_wmem': f'32768 262144 {tcp_wmem_max}',
+        'net.ipv4.tcp_notsent_lowat': math.floor(min(L / 2, 524288)),
+        'net.ipv4.tcp_adv_win_scale': max(2, math.ceil(F * adv_component)),
+        'net.ipv4.tcp_no_metrics_save': 1,
+        'net.ipv4.tcp_max_syn_backlog': max_syn,
+        'net.ipv4.tcp_max_orphans': 16384 if mem <= 256 else 32768,
+        'net.ipv4.tcp_synack_retries': 2,
+        'net.ipv4.tcp_syn_retries': 2,
+        'net.ipv4.neigh.default.gc_thresh1': 256 if mem <= 512 else 512,
+        'net.ipv4.neigh.default.gc_thresh2': 1024 if mem <= 512 else 2048,
+        'net.ipv4.neigh.default.gc_thresh3': 2048 if mem <= 512 else 4096,
+    }
+
+print(json.dumps(data, ensure_ascii=False))
+PY
+  )
+
+  export PROFILE_JSON="$json"
+  python3 - <<'PY'
+import json, os, pathlib
+conf = pathlib.Path('/etc/sysctl.d/99-vpsbox-bbr.conf')
+limits = pathlib.Path('/etc/security/limits.d/99-vpsbox-tcp.conf')
+systemd = pathlib.Path('/etc/systemd/system.conf.d/99-vpsbox-tcp.conf')
+data = json.loads(os.environ['PROFILE_JSON'])
+mode = data.pop('mode')
+header = [
+    '# VPSBox Dynamic TCP Profile',
+    f'# Mode: {mode}',
+    f"# Input: local={os.environ['LOCAL_BW']}Mbps vps={os.environ['VPS_BW']}Mbps rtt={os.environ['LATENCY']}ms mem={os.environ['MEM_MB']}MB cc={os.environ['CC']} ecn={os.environ['ECN']}",
+]
+lines = header + [f'{k} = {v}' for k,v in data.items()]
+conf.write_text('\n'.join(lines) + '\n')
+limits.write_text('* soft nofile 1048576\n* hard nofile 1048576\n')
+systemd.write_text('DefaultLimitNOFILE=1048576\nDefaultLimitNPROC=65535\n')
+PY
 
   _svc_daemon_reload >/dev/null 2>&1 || true
+  local mode
+  mode=$(python3 - <<'PY'
+import json, os
+print(json.loads(os.environ['PROFILE_JSON'])['mode'])
+PY
+  )
   echo -e "\n${CYAN}>>> 即将应用新的 TCP 调优画像${NC}"
   echo -e "  模式: ${YELLOW}${mode}${NC}"
-  echo -e "  拥塞算法: ${YELLOW}${cc}${NC} | 队列: ${YELLOW}${qdisc}${NC} | ECN: ${YELLOW}${ecn}${NC}"
-  echo -e "  输入: ${YELLOW}${local_bw}Mbps / ${vps_bw}Mbps / ${latency}ms / ${mem_mb}MB${NC}"
+  echo -e "  拥塞算法: ${YELLOW}${cc}${NC} | ECN: ${YELLOW}${ecn}${NC}"
+  echo -e "  输入: ${YELLOW}${local_bw}Mbps / ${vps_bw}Mbps / ${latency}ms / ${mem_mb}MB / ramp=${ramp}${NC}"
   if _bbr_apply_sysctl_file "$conf"; then
     echo -e "\n${GREEN}[完成] TCP 调优画像已写入并生效。${NC}"
   else
