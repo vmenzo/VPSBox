@@ -4,7 +4,7 @@
 # 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.8"
+VPSBOX_VERSION="v1.7.9"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -1859,11 +1859,22 @@ else:
     curve1 = clamp((math.log(ramp * (math.e - 1) + 1) / math.log(math.e)) * stability * (buffer_aggression / 2), 0.5, 3)
     latency_input = min(1, (latency - 120) / 1880)
     latency_ramp = clamp((latency - 120) / 680, 0, 1)
+    pre_extreme_penalty = clamp((980 - latency) / 260, 0, 1)
+    ratio_guard = clamp((1.6 - min(ratio, 1.6)) / 1.2, 0, 1)
+    ramp_guard = clamp((ramp - 0.55) / 0.45, 0, 1)
     latency_factor = clamp((math.log(latency_input * (latency_curve_tolerance - 1) + 1) / math.log(latency_curve_tolerance)) * latency_tolerance * curve1 if latency_input > 0 else 0, 1, 8)
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
     adv_component = clamp(latency_factor / (latency_tolerance * (3.0 - 0.9 * latency_ramp)) * adv_factor * (win_base * (0.26 + 0.14 * latency_ramp)) * ((0.62 + 0.26 * latency_ramp) * curve1 + (0.34 + 0.12 * latency_ramp)), 1.5, max(3, math.ceil(win_max - (5.5 - 2.5 * latency_ramp))))
+    adv_value = clamp_tcp_window_scale(max(2, math.ceil(F * adv_component)))
+    if mem >= 2048 and ramp >= 0.8 and ratio <= 1.6:
+        if latency <= 650:
+            adv_value = min(adv_value, 24)
+        elif latency <= 900:
+            adv_value = min(adv_value, 28 if ratio <= 1 else 29)
+        elif latency <= 1400:
+            adv_value = min(adv_value, 30)
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor
         Q = clamp(1.5 * F, 3, 6)
@@ -1901,7 +1912,7 @@ else:
         'net.ipv4.tcp_rmem': clamp_tcp_triplet(32768, 262144, tcp_rmem_max),
         'net.ipv4.tcp_wmem': clamp_tcp_triplet(32768, 262144, tcp_wmem_max),
         'net.ipv4.tcp_notsent_lowat': math.floor(min(L / 2, 524288)),
-        'net.ipv4.tcp_adv_win_scale': clamp_tcp_window_scale(max(2, math.ceil(F * adv_component))),
+        'net.ipv4.tcp_adv_win_scale': adv_value,
         'net.ipv4.tcp_no_metrics_save': 1,
         'net.ipv4.tcp_max_syn_backlog': max_syn,
         'net.ipv4.tcp_max_orphans': 16384 if mem <= 256 else 32768,
@@ -2875,11 +2886,22 @@ else:
     curve1 = clamp((math.log(ramp * (math.e - 1) + 1) / math.log(math.e)) * stability * (buffer_aggression / 2), 0.5, 3)
     latency_input = min(1, (latency - 120) / 1880)
     latency_ramp = clamp((latency - 120) / 680, 0, 1)
+    pre_extreme_penalty = clamp((980 - latency) / 260, 0, 1)
+    ratio_guard = clamp((1.6 - min(ratio, 1.6)) / 1.2, 0, 1)
+    ramp_guard = clamp((ramp - 0.55) / 0.45, 0, 1)
     latency_factor = clamp((math.log(latency_input * (latency_curve_tolerance - 1) + 1) / math.log(latency_curve_tolerance)) * latency_tolerance * curve1 if latency_input > 0 else 0, 1, 8)
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
     adv_component = clamp(latency_factor / (latency_tolerance * (3.0 - 0.9 * latency_ramp)) * adv_factor * (win_base * (0.26 + 0.14 * latency_ramp)) * ((0.62 + 0.26 * latency_ramp) * curve1 + (0.34 + 0.12 * latency_ramp)), 1.5, max(3, math.ceil(win_max - (5.5 - 2.5 * latency_ramp))))
+    adv_value = clamp_tcp_window_scale(max(2, math.ceil(F * adv_component)))
+    if mem >= 2048 and ramp >= 0.8 and ratio <= 1.6:
+        if latency <= 650:
+            adv_value = min(adv_value, 24)
+        elif latency <= 900:
+            adv_value = min(adv_value, 28 if ratio <= 1 else 29)
+        elif latency <= 1400:
+            adv_value = min(adv_value, 30)
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor; Q = clamp(1.5 * F, 3, 6)
     elif mem <= 1024:
@@ -2895,7 +2917,7 @@ else:
     backlog = int(clamp(math.floor(0.3 * J * Z), 8192, 16384 if mem <= 512 else 32768))
     max_syn = int(clamp(math.floor(0.6 * J * Z), 8192, 32768 if mem <= 512 else 65536))
     min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024))), high_latency=True)
-    data = {**base,'net.core.default_qdisc':qdisc,'vm.swappiness':5,'vm.dirty_ratio':5,'vm.dirty_background_ratio':2,'vm.min_free_kbytes':min_free,'net.core.netdev_max_backlog':backlog,'net.core.rmem_max':W,'net.core.wmem_max':W,'net.core.rmem_default':262144,'net.core.wmem_default':262144,'net.core.somaxconn':somaxconn,'net.core.optmem_max':math.floor(min(262144, L / 2)),'net.ipv4.tcp_fack':1,'net.ipv4.tcp_rmem':f'32768 262144 {tcp_rmem_max}','net.ipv4.tcp_wmem':f'32768 262144 {tcp_wmem_max}','net.ipv4.tcp_notsent_lowat':math.floor(min(L / 2, 524288)),'net.ipv4.tcp_adv_win_scale':max(2, math.ceil(F * adv_component)),'net.ipv4.tcp_no_metrics_save':1,'net.ipv4.tcp_max_syn_backlog':max_syn,'net.ipv4.tcp_max_orphans':16384 if mem <= 256 else 32768,'net.ipv4.tcp_synack_retries':2,'net.ipv4.tcp_syn_retries':2,'net.ipv4.neigh.default.gc_thresh1':256 if mem <= 512 else 512,'net.ipv4.neigh.default.gc_thresh2':1024 if mem <= 512 else 2048,'net.ipv4.neigh.default.gc_thresh3':2048 if mem <= 512 else 4096}
+    data = {**base,'net.core.default_qdisc':qdisc,'vm.swappiness':5,'vm.dirty_ratio':5,'vm.dirty_background_ratio':2,'vm.min_free_kbytes':min_free,'net.core.netdev_max_backlog':backlog,'net.core.rmem_max':W,'net.core.wmem_max':W,'net.core.rmem_default':262144,'net.core.wmem_default':262144,'net.core.somaxconn':somaxconn,'net.core.optmem_max':math.floor(min(262144, L / 2)),'net.ipv4.tcp_fack':1,'net.ipv4.tcp_rmem':f'32768 262144 {tcp_rmem_max}','net.ipv4.tcp_wmem':f'32768 262144 {tcp_wmem_max}','net.ipv4.tcp_notsent_lowat':math.floor(min(L / 2, 524288)),'net.ipv4.tcp_adv_win_scale':adv_value,'net.ipv4.tcp_no_metrics_save':1,'net.ipv4.tcp_max_syn_backlog':max_syn,'net.ipv4.tcp_max_orphans':16384 if mem <= 256 else 32768,'net.ipv4.tcp_synack_retries':2,'net.ipv4.tcp_syn_retries':2,'net.ipv4.neigh.default.gc_thresh1':256 if mem <= 512 else 512,'net.ipv4.neigh.default.gc_thresh2':1024 if mem <= 512 else 2048,'net.ipv4.neigh.default.gc_thresh3':2048 if mem <= 512 else 4096}
 print(json.dumps(data, ensure_ascii=False))
 PY
 )

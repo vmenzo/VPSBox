@@ -52,21 +52,21 @@
       "case": {
         "local_bw": 5,
         "vps_bw": 10,
-        "latency": 800,
-        "mem": 4096,
+        "latency": 1500,
+        "mem": 2048,
         "ramp": 1.0
       },
       "profile": {
         "mode": "high",
         "qdisc": "fq",
-        "rmem_max": 4194304,
-        "wmem_max": 4194304,
+        "rmem_max": 7864320,
+        "wmem_max": 7864320,
         "somaxconn": 2560,
         "backlog": 8192,
         "max_syn": 8192,
-        "min_free": 148336,
-        "tcp_rmem": "32768 262144 4194304",
-        "tcp_wmem": "32768 262144 4194304",
+        "min_free": 65536,
+        "tcp_rmem": "32768 262144 7864320",
+        "tcp_wmem": "32768 262144 7864320",
         "adv": 31
       },
       "issues": []
