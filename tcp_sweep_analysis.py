@@ -247,12 +247,17 @@ def profile(local_bw, vps_bw, latency, mem, ramp):
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
     adv_component = clamp(latency_factor / (latency_tolerance * (3.0 - 0.9 * latency_ramp)) * adv_factor * (win_base * (0.26 + 0.14 * latency_ramp)) * ((0.62 + 0.26 * latency_ramp) * curve1 + (0.34 + 0.12 * latency_ramp)), 1.5, max(3, math.ceil(win_max - (5.5 - 2.5 * latency_ramp))))
     adv_value = clamp_tcp_window_scale(max(2, math.ceil(F * adv_component)))
-    if mem >= 2048 and ramp >= 0.8 and ratio <= 1.6:
-        if latency <= 650:
+    if mem >= 2048 and ratio <= 1.6:
+        if latency <= 650 and ramp >= 0.8:
             adv_value = min(adv_value, 24)
-        elif latency <= 900:
+        elif latency <= 820:
+            if ramp >= 0.8:
+                adv_value = min(adv_value, 28 if ratio <= 1 else 29)
+            elif ramp <= 0.55:
+                adv_value = min(adv_value, 30)
+        elif latency <= 900 and ramp >= 0.8:
             adv_value = min(adv_value, 28 if ratio <= 1 else 29)
-        elif latency <= 1400:
+        elif latency <= 1400 and ramp >= 0.8:
             adv_value = min(adv_value, 30)
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor
