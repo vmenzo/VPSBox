@@ -1,0 +1,84 @@
+# TCP tuning verification report
+
+- Omnitt source checked: https://www.omnitt.com/tcp-optimizer (currently returns 404 shell with TCP optimizer metadata only; no public generator UI/API/output exposed)
+- Omnitt evidence: title_found=True, desc_found=True, title=404: This page could not be found.
+- Direct Omnitt diff status: blocked (Omnitt public endpoint is not exposing runtime generator outputs or readable calculation code, so direct scenario-by-scenario diff against live Omnitt cannot be truthfully completed from public access.)
+
+## Overall live applicability on this kernel
+- apply_success_ratio: 1.000000
+- readback_match_ratio_of_all: 1.000000
+- readback_match_ratio_of_applied: 1.000000
+
+## Scenario results
+- low-latency-small-mem: mode=低延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: cake
+  - net.core.rmem_max: 4194304
+  - net.core.wmem_max: 4194304
+  - net.ipv4.tcp_rmem: 8192 87380 491520
+  - net.ipv4.tcp_wmem: 8192 65536 235929
+  - net.ipv4.tcp_adv_win_scale: 3
+  - net.core.somaxconn: 256
+  - net.core.netdev_max_backlog: 2000
+- low-latency-high-mem: mode=低延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: cake
+  - net.core.rmem_max: 8388608
+  - net.core.wmem_max: 8388608
+  - net.ipv4.tcp_rmem: 8192 87380 8388608
+  - net.ipv4.tcp_wmem: 8192 65536 8388608
+  - net.ipv4.tcp_adv_win_scale: 4
+  - net.core.somaxconn: 1200
+  - net.core.netdev_max_backlog: 2400
+- 120ms-boundary: mode=低延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: cake
+  - net.core.rmem_max: 8388608
+  - net.core.wmem_max: 8388608
+  - net.ipv4.tcp_rmem: 8192 87380 8388608
+  - net.ipv4.tcp_wmem: 8192 65536 7356528
+  - net.ipv4.tcp_adv_win_scale: 4
+  - net.core.somaxconn: 256
+  - net.core.netdev_max_backlog: 2000
+- high-latency-mid-mem: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: fq
+  - net.core.rmem_max: 18991967
+  - net.core.wmem_max: 18991967
+  - net.ipv4.tcp_rmem: 32768 262144 18991967
+  - net.ipv4.tcp_wmem: 32768 262144 18991967
+  - net.ipv4.tcp_adv_win_scale: 13
+  - net.core.somaxconn: 2560
+  - net.core.netdev_max_backlog: 8192
+- high-latency-high-mem: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: fq
+  - net.core.rmem_max: 91750400
+  - net.core.wmem_max: 91750400
+  - net.ipv4.tcp_rmem: 32768 262144 91750400
+  - net.ipv4.tcp_wmem: 32768 262144 91750400
+  - net.ipv4.tcp_adv_win_scale: 29
+  - net.core.somaxconn: 2560
+  - net.core.netdev_max_backlog: 8192
+- very-high-latency: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: fq
+  - net.core.rmem_max: 33158884
+  - net.core.wmem_max: 33158884
+  - net.ipv4.tcp_rmem: 32768 262144 33158884
+  - net.ipv4.tcp_wmem: 32768 262144 33158884
+  - net.ipv4.tcp_adv_win_scale: 20
+  - net.core.somaxconn: 2560
+  - net.core.netdev_max_backlog: 8192
+- clamp-low-inputs: mode=低延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: cake
+  - net.core.rmem_max: 4194304
+  - net.core.wmem_max: 4194304
+  - net.ipv4.tcp_rmem: 8192 87380 87380
+  - net.ipv4.tcp_wmem: 8192 65536 65536
+  - net.ipv4.tcp_adv_win_scale: 2
+  - net.core.somaxconn: 256
+  - net.core.netdev_max_backlog: 2000
+- clamp-high-inputs: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
+  - net.core.default_qdisc: fq
+  - net.core.rmem_max: 262144
+  - net.core.wmem_max: 262144
+  - net.ipv4.tcp_rmem: 32768 262144 262144
+  - net.ipv4.tcp_wmem: 32768 262144 262144
+  - net.ipv4.tcp_adv_win_scale: 31
+  - net.core.somaxconn: 2560
+  - net.core.netdev_max_backlog: 8192
