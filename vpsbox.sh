@@ -1368,24 +1368,6 @@ _bbr_apply_sysctl_file() {
   sysctl --system >/dev/null 2>&1
 }
 
-_bbr_apply_sysctl() {
-  local qdisc="${1:-fq}" cc="${2:-bbr}"
-  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
-  mkdir -p /etc/sysctl.d
-  sed -i '/net.ipv4.tcp_congestion_control/d; /net.core.default_qdisc/d' /etc/sysctl.conf 2>/dev/null
-  [[ -f "$conf" ]] && sed -i '/net.ipv4.tcp_congestion_control/d; /net.core.default_qdisc/d' "$conf"
-  echo "net.core.default_qdisc=$qdisc" >> "$conf"
-  echo "net.ipv4.tcp_congestion_control=$cc" >> "$conf"
-  _bbr_apply_sysctl_file "$conf"
-}
-
-_bbr_clean_accel() {
-  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
-  [[ -f "$conf" ]] && sed -i '/net.core.default_qdisc/d; /net.ipv4.tcp_congestion_control/d' "$conf"
-  sed -i '/net.core.default_qdisc/d; /net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf 2>/dev/null
-  sysctl --system >/dev/null 2>&1
-}
-
 _bbr_psabi_level() {
   awk 'BEGIN {
     while (!/flags/) if (getline < "/proc/cpuinfo" != 1) exit 1
@@ -1398,6 +1380,308 @@ _bbr_psabi_level() {
   }' /proc/cpuinfo 2>/dev/null | tr -dc '0-9' | head -c 1
 }
 
+_bbr_ceil_div() {
+  local num="$1" den="$2"
+  echo $(((num + den - 1) / den))
+}
+
+_bbr_int_sqrt() {
+  local n="$1"
+  python3 - <<PY
+import math
+n=max(0,int(${n}))
+print(int(math.isqrt(n)))
+PY
+}
+
+_bbr_clamp() {
+  local val="$1" minv="$2" maxv="$3"
+  (( val < minv )) && val=$minv
+  (( val > maxv )) && val=$maxv
+  echo "$val"
+}
+
+_bbr_detect_memory_mb() {
+  awk '/MemTotal/ {printf "%d\n", int($2/1024)}' /proc/meminfo 2>/dev/null | head -1
+}
+
+_bbr_dynamic_defaults() {
+  BBR_TUNE_LOCAL_BW="1000"
+  BBR_TUNE_VPS_BW="1000"
+  BBR_TUNE_LATENCY="80"
+  BBR_TUNE_MEMORY_MB=$(_bbr_detect_memory_mb)
+  [[ -z "$BBR_TUNE_MEMORY_MB" ]] && BBR_TUNE_MEMORY_MB=1024
+  BBR_TUNE_MEMORY_MB=$(_bbr_clamp "$BBR_TUNE_MEMORY_MB" 64 32768)
+  BBR_TUNE_RAMP="0.80"
+  BBR_TUNE_CC="bbr"
+  BBR_TUNE_ECN="0"
+}
+
+_bbr_collect_dynamic_inputs() {
+  _bbr_dynamic_defaults
+  local ans
+  echo -e "\n${CYAN}>>> 请输入网络环境参数，直接回车使用推荐默认值。${NC}"
+  read -r -p "> 本地带宽 Mbps [${BBR_TUNE_LOCAL_BW}]: " ans
+  [[ "$ans" =~ ^[0-9]+$ ]] && BBR_TUNE_LOCAL_BW="$ans"
+  read -r -p "> 服务器带宽 Mbps [${BBR_TUNE_VPS_BW}]: " ans
+  [[ "$ans" =~ ^[0-9]+$ ]] && BBR_TUNE_VPS_BW="$ans"
+  read -r -p "> 网络延迟 RTT ms [${BBR_TUNE_LATENCY}]: " ans
+  [[ "$ans" =~ ^[0-9]+$ ]] && BBR_TUNE_LATENCY="$ans"
+  read -r -p "> 可用内存 MB [${BBR_TUNE_MEMORY_MB}]: " ans
+  [[ "$ans" =~ ^[0-9]+$ ]] && BBR_TUNE_MEMORY_MB="$ans"
+  read -r -p "> 爬升强度 0.1-1 [${BBR_TUNE_RAMP}]: " ans
+  if [[ "$ans" =~ ^(0\.[0-9]+|1(\.0+)?)$ ]]; then
+    BBR_TUNE_RAMP="$ans"
+  fi
+  echo ""
+  echo -e "  1) BBR"
+  echo -e "  2) BBRplus"
+  read -r -p "> 拥塞算法 [1]: " ans
+  [[ "$ans" == "2" ]] && BBR_TUNE_CC="bbrplus"
+  echo ""
+  echo -e "  1) 自动按链路选择"
+  echo -e "  2) 开启 ECN"
+  echo -e "  3) 关闭 ECN"
+  read -r -p "> ECN 选项 [1]: " ans
+  case "$ans" in
+    2) BBR_TUNE_ECN="1" ;;
+    3) BBR_TUNE_ECN="0" ;;
+  esac
+  BBR_TUNE_LOCAL_BW=$(_bbr_clamp "$BBR_TUNE_LOCAL_BW" 1 100000)
+  BBR_TUNE_VPS_BW=$(_bbr_clamp "$BBR_TUNE_VPS_BW" 1 100000)
+  BBR_TUNE_LATENCY=$(_bbr_clamp "$BBR_TUNE_LATENCY" 1 2000)
+  BBR_TUNE_MEMORY_MB=$(_bbr_clamp "$BBR_TUNE_MEMORY_MB" 64 32768)
+}
+
+_bbr_generate_dynamic_profile() {
+  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
+  local local_bw="$BBR_TUNE_LOCAL_BW" vps_bw="$BBR_TUNE_VPS_BW" latency="$BBR_TUNE_LATENCY" mem_mb="$BBR_TUNE_MEMORY_MB" cc="$BBR_TUNE_CC" ecn="$BBR_TUNE_ECN"
+  local qdisc mode
+  local sqrt_ratio factor_x1024 throughput_bps bdp minfree
+  local rmem_default wmem_default optmem_max somaxconn netdev_max_backlog max_syn_backlog max_orphans
+  local tcp_rmem_min tcp_rmem_def tcp_rmem_max tcp_wmem_min tcp_wmem_def tcp_wmem_max
+  local gc1 gc2 gc3 fack no_metrics syn_retries synack_retries notsent_lowat adv_win_scale swappiness dirty_ratio dirty_bg_ratio
+
+  if (( latency <= 120 )); then
+    mode="低延迟画像"
+    qdisc="cake"
+    sqrt_ratio=$(_bbr_int_sqrt $(( (local_bw * 1000) / (vps_bw > 0 ? vps_bw : 1) )))
+    factor_x1024=$(( 1536 * sqrt_ratio / 31 ))
+    (( factor_x1024 < 1024 )) && factor_x1024=1024
+    (( factor_x1024 > 2048 )) && factor_x1024=2048
+    throughput_bps=$(( ((local_bw * factor_x1024 / 1024) < vps_bw ? (local_bw * factor_x1024 / 1024) : vps_bw) * 131072 ))
+    bdp=$(_bbr_ceil_div $(( throughput_bps * latency )) 1000)
+    (( bdp < 24576 )) && bdp=24576
+    tcp_rmem_min=8192
+    tcp_rmem_def=87380
+    tcp_wmem_min=8192
+    tcp_wmem_def=65536
+    rmem_default=87380
+    wmem_default=65536
+    tcp_rmem_max=$(( bdp * (mem_mb <= 256 ? 5 : mem_mb <= 512 ? 6 : 8) / 2 ))
+    tcp_wmem_max=$(( bdp * (mem_mb <= 256 ? 12 : mem_mb <= 512 ? 15 : 20) / 10 ))
+    tcp_rmem_max=$(_bbr_clamp "$tcp_rmem_max" 4194304 33554432)
+    tcp_wmem_max=$(_bbr_clamp "$tcp_wmem_max" 2097152 33554432)
+    optmem_max=$(_bbr_clamp $(( bdp / 4 )) 16384 65536)
+    somaxconn=$(_bbr_clamp $(( throughput_bps / 262144 )) 256 2048)
+    netdev_max_backlog=$(_bbr_clamp $(( throughput_bps / 131072 )) 2000 4000)
+    max_syn_backlog=$(_bbr_clamp $(( throughput_bps / 65536 )) 2048 16384)
+    max_orphans=65536
+    gc1=1024; gc2=4096; gc3=8192
+    fack=0
+    no_metrics=0
+    syn_retries=3
+    synack_retries=2
+    notsent_lowat=4096
+    adv_win_scale=2
+    swappiness=10
+    dirty_ratio=10
+    dirty_bg_ratio=5
+    minfree=$(( mem_mb * (mem_mb <= 256 ? 15 : mem_mb <= 512 ? 20 : mem_mb <= 1024 ? 25 : 30) + throughput_bps / 2048 ))
+    minfree=$(_bbr_clamp "$minfree" 32768 1048576)
+  else
+    mode="高延迟画像"
+    qdisc="fq"
+    sqrt_ratio=$(_bbr_int_sqrt $(( (local_bw * 1000) / (vps_bw > 0 ? vps_bw : 1) )))
+    factor_x1024=$(( (2048 * latency / 40) * sqrt_ratio / 31 ))
+    (( factor_x1024 < 1536 )) && factor_x1024=1536
+    (( factor_x1024 > 5120 )) && factor_x1024=5120
+    local scaled_vps=$(( vps_bw * 2 ))
+    local scaled_local=$(( local_bw * factor_x1024 / 1024 ))
+    throughput_bps=$(( (scaled_local < scaled_vps ? scaled_local : scaled_vps) * 131072 ))
+    bdp=$(_bbr_ceil_div $(( throughput_bps * latency )) 1000)
+    (( bdp < 131072 )) && bdp=131072
+    tcp_rmem_min=32768
+    tcp_rmem_def=262144
+    tcp_wmem_min=32768
+    tcp_wmem_def=262144
+    rmem_default=262144
+    wmem_default=262144
+    tcp_rmem_max=$(( bdp * (mem_mb <= 512 ? 6 : mem_mb <= 1024 ? 8 : 10) ))
+    tcp_wmem_max=$(( bdp * (mem_mb <= 512 ? 5 : mem_mb <= 1024 ? 8 : 10) ))
+    tcp_rmem_max=$(_bbr_clamp "$tcp_rmem_max" 8388608 67108864)
+    tcp_wmem_max=$(_bbr_clamp "$tcp_wmem_max" 4194304 67108864)
+    optmem_max=$(_bbr_clamp $(( bdp / 2 )) 65536 262144)
+    somaxconn=$(_bbr_clamp $(( throughput_bps / 52428 )) 2560 $(( mem_mb <= 512 ? 8192 : 16384 )))
+    netdev_max_backlog=$(_bbr_clamp $(( throughput_bps / 26214 )) 8192 $(( mem_mb <= 512 ? 16384 : 32768 )))
+    max_syn_backlog=$(_bbr_clamp $(( throughput_bps / 13107 )) 8192 $(( mem_mb <= 512 ? 32768 : 65536 )))
+    max_orphans=$(( mem_mb <= 256 ? 16384 : 32768 ))
+    gc1=$(( mem_mb <= 512 ? 256 : 512 ))
+    gc2=$(( mem_mb <= 512 ? 1024 : 2048 ))
+    gc3=$(( mem_mb <= 512 ? 2048 : 4096 ))
+    fack=1
+    no_metrics=1
+    syn_retries=2
+    synack_retries=2
+    notsent_lowat=$(_bbr_clamp $(( bdp / 2 )) 4096 524288)
+    adv_win_scale=$(_bbr_clamp $(( latency / 60 )) 2 $(( mem_mb <= 512 ? 6 : mem_mb <= 1024 ? 8 : mem_mb <= 2048 ? 12 : 16 )))
+    swappiness=5
+    dirty_ratio=5
+    dirty_bg_ratio=2
+    minfree=$(( mem_mb * (mem_mb <= 512 ? 20 : mem_mb <= 1024 ? 25 : mem_mb <= 2048 ? 30 : 35) + throughput_bps / 1706 ))
+    minfree=$(_bbr_clamp "$minfree" 65536 1048576)
+  fi
+
+  if (( mem_mb <= 256 )); then
+    echo "* soft nofile 1048576" > /etc/security/limits.d/99-vpsbox-tcp.conf
+    echo "* hard nofile 1048576" >> /etc/security/limits.d/99-vpsbox-tcp.conf
+    echo "DefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
+    echo "DefaultLimitNPROC=65535" >> /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
+  else
+    echo "* soft nofile 1048576" > /etc/security/limits.d/99-vpsbox-tcp.conf
+    echo "* hard nofile 1048576" >> /etc/security/limits.d/99-vpsbox-tcp.conf
+    echo "DefaultLimitNOFILE=1048576" > /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
+    echo "DefaultLimitNPROC=65535" >> /etc/systemd/system.conf.d/99-vpsbox-tcp.conf
+  fi
+  mkdir -p /etc/systemd/system.conf.d /etc/security/limits.d
+
+  cat > "$conf" <<EOF
+# VPSBox Dynamic TCP Profile
+# Mode: $mode
+# Input: local=${local_bw}Mbps vps=${vps_bw}Mbps rtt=${latency}ms mem=${mem_mb}MB cc=${cc} ecn=${ecn}
+kernel.pid_max = 65535
+kernel.panic = 1
+kernel.sysrq = 1
+kernel.core_pattern = core_%e
+kernel.printk = 3 4 1 3
+kernel.numa_balancing = 0
+kernel.sched_autogroup_enabled = 0
+
+vm.swappiness = $swappiness
+vm.dirty_ratio = $dirty_ratio
+vm.dirty_background_ratio = $dirty_bg_ratio
+vm.panic_on_oom = 1
+vm.overcommit_memory = 1
+vm.min_free_kbytes = $minfree
+vm.vfs_cache_pressure = 100
+vm.dirty_expire_centisecs = 3000
+vm.dirty_writeback_centisecs = 500
+
+net.core.default_qdisc = $qdisc
+net.core.netdev_max_backlog = $netdev_max_backlog
+net.core.rmem_max = $tcp_rmem_max
+net.core.wmem_max = $tcp_wmem_max
+net.core.rmem_default = $rmem_default
+net.core.wmem_default = $wmem_default
+net.core.somaxconn = $somaxconn
+net.core.optmem_max = $optmem_max
+
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 10
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_max_tw_buckets = 32768
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_fack = $fack
+net.ipv4.tcp_rmem = $tcp_rmem_min $tcp_rmem_def $tcp_rmem_max
+net.ipv4.tcp_wmem = $tcp_wmem_min $tcp_wmem_def $tcp_wmem_max
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_congestion_control = $cc
+net.ipv4.tcp_notsent_lowat = $notsent_lowat
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = $adv_win_scale
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.ipv4.tcp_no_metrics_save = $no_metrics
+net.ipv4.tcp_max_syn_backlog = $max_syn_backlog
+net.ipv4.tcp_max_orphans = $max_orphans
+net.ipv4.tcp_synack_retries = $synack_retries
+net.ipv4.tcp_syn_retries = $syn_retries
+net.ipv4.tcp_abort_on_overflow = 0
+net.ipv4.tcp_stdurg = 0
+net.ipv4.tcp_rfc1337 = 0
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_ecn = $ecn
+
+net.ipv4.ip_forward = 0
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.ip_no_pmtu_disc = 0
+net.ipv4.route.gc_timeout = 100
+net.ipv4.neigh.default.gc_stale_time = 120
+net.ipv4.neigh.default.gc_thresh1 = $gc1
+net.ipv4.neigh.default.gc_thresh2 = $gc2
+net.ipv4.neigh.default.gc_thresh3 = $gc3
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.forwarding = 0
+net.ipv4.conf.default.forwarding = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.arp_announce = 2
+net.ipv4.conf.default.arp_announce = 2
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.default.arp_ignore = 1
+EOF
+
+  _svc_daemon_reload >/dev/null 2>&1 || true
+  echo -e "\n${CYAN}>>> 即将应用新的 TCP 调优画像${NC}"
+  echo -e "  模式: ${YELLOW}${mode}${NC}"
+  echo -e "  拥塞算法: ${YELLOW}${cc}${NC} | 队列: ${YELLOW}${qdisc}${NC} | ECN: ${YELLOW}${ecn}${NC}"
+  echo -e "  输入: ${YELLOW}${local_bw}Mbps / ${vps_bw}Mbps / ${latency}ms / ${mem_mb}MB${NC}"
+  if _bbr_apply_sysctl_file "$conf"; then
+    echo -e "\n${GREEN}[完成] TCP 调优画像已写入并生效。${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] TCP 调优画像已写入，但 sysctl 应用失败，请手动检查。${NC}"
+  fi
+  pause_for_enter
+}
+
+_bbr_show_dynamic_plan() {
+  clear_screen; print_divider
+  print_center "[ TCP 动态调优说明 ]" "$CYAN"
+  echo ""
+  echo -e "  ${CYAN}当前方案会根据以下变量自动生成参数:${NC}"
+  echo -e "  - 本地带宽 / 服务器带宽"
+  echo -e "  - RTT 延迟"
+  echo -e "  - 可用内存"
+  echo -e "  - 拥塞算法"
+  echo ""
+  echo -e "  ${CYAN}调优逻辑:${NC}"
+  echo -e "  - RTT <= 120ms: 偏低延迟画像，优先使用 CAKE"
+  echo -e "  - RTT > 120ms : 偏长肥管道画像，优先使用 FQ"
+  echo -e "  - 自动联动生成缓冲、队列、窗口、邻居阈值、limits/systemd"
+  echo ""
+  pause_for_enter
+}
+
+_bbr_show_generated_profile() {
+  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
+  clear_screen; print_divider
+  print_center "[ 当前 TCP 调优画像 ]" "$CYAN"
+  echo ""
+  if [[ -f "$conf" ]]; then
+    sed 's/^/  /' "$conf"
+  else
+    echo -e "  ${YELLOW}尚未生成调优画像。${NC}"
+  fi
+  echo ""
+  pause_for_enter
+}
+
 _bbr_set_ecn() {
   local status="$1"
   local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
@@ -1406,8 +1690,9 @@ _bbr_set_ecn() {
     pause_for_enter
     return 1
   fi
+  [[ ! -f "$conf" ]] && { echo -e "\n${YELLOW}[提示] 请先生成 TCP 调优画像。${NC}"; pause_for_enter; return 1; }
   sed -i '/net.ipv4.tcp_ecn/d' "$conf" /etc/sysctl.conf 2>/dev/null
-  echo "net.ipv4.tcp_ecn=$status" >> "$conf"
+  echo "net.ipv4.tcp_ecn = $status" >> "$conf"
   if _bbr_apply_sysctl_file "$conf"; then
     [[ "$status" == "1" ]] && echo -e "\n${GREEN}[成功] ECN 已开启！${NC}" || echo -e "\n${GREEN}[成功] ECN 已关闭！${NC}"
   else
@@ -1478,35 +1763,14 @@ _bbr_delete_kernel() {
 
 _bbr_remove_all() {
   echo -e "\n${CYAN}>>> 清除加速与优化配置...${NC}"
-  # 只删除 vpsbox 写入的参数，保留系统原有配置
   local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
-  rm -f "$conf"
-  # 仅从 /etc/sysctl.conf 中删除 vpsbox 相关的参数行（不破坏其他内容）
+  rm -f "$conf" /etc/systemd/system.conf.d/99-vpsbox-tcp.conf /etc/security/limits.d/99-vpsbox-tcp.conf
   sed -i '/net\.core\.default_qdisc/d; /net\.ipv4\.tcp_congestion_control/d; /net\.ipv4\.tcp_ecn/d' /etc/sysctl.conf 2>/dev/null
   sed -i '/net\.ipv6\.conf\.all\.disable_ipv6/d; /net\.ipv6\.conf\.default\.disable_ipv6/d' /etc/sysctl.conf 2>/dev/null
   sed -i '/net\.ipv4\.tcp_syncookies/d; /net\.ipv4\.tcp_max_syn_backlog/d; /net\.ipv4\.tcp_synack_retries/d' /etc/sysctl.conf 2>/dev/null
   sysctl --system >/dev/null 2>&1
-  sed -i '/DefaultLimitNOFILE/d; /DefaultLimitNPROC/d' /etc/systemd/system.conf 2>/dev/null
-  sed -i '/soft   nofile/d; /hard   nofile/d' /etc/security/limits.conf 2>/dev/null
   _svc_daemon_reload
   echo -e "\n${GREEN}[完成] 系统已恢复原生状态。${NC}"; pause_for_enter
-}
-
-_bbr_optimizing_ddcc() {
-  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
-  sed -i '/net.ipv4.tcp_syncookies/d; /net.ipv4.tcp_max_syn_backlog/d; /net.ipv4.tcp_synack_retries/d' "$conf" 2>/dev/null
-  cat >> "$conf" <<EOF
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_max_syn_backlog = 1024000
-net.ipv4.tcp_synack_retries = 1
-EOF
-  echo -e "${YELLOW}[提示] 将写入偏激进的防 CC TCP 参数，低内存或弱网络环境请谨慎使用。${NC}"
-  if _bbr_apply_sysctl_file "$conf"; then
-    echo -e "\n${GREEN}[完成] 防CC基础参数已写入并生效！${NC}"
-  else
-    echo -e "\n${YELLOW}[警告] 防CC参数已写入，但应用失败，请手动检查。${NC}"
-  fi
-  pause_for_enter
 }
 
 _bbr_ipv6_off() {
@@ -1538,7 +1802,6 @@ _bbr_ipv6_on() {
 _bbr_sysctl_merge() {
   local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
   echo -e "\n${CYAN}>>> 逐行输入参数 (格式: key = value)，空行结束。${NC}"
-  echo -e "  参考: https://omnitt.com/\n"
   local line; while IFS= read -r -p "> " line; do
     [[ -z "${line// /}" ]] && break
     [[ "$line" =~ ^[[:space:]]*[#\;] ]] && continue
@@ -1713,19 +1976,16 @@ if [[ "$BBR_ARCH" == "aarch64" ]]; then
   echo -e "  ${YELLOW}[提示]${NC} 当前为 ARM 架构，内核已内置 BBR，更换内核可能不兼容"
 fi
 echo ""
-echo -e "  ─────────────── ${CYAN}加速启用${NC} ───────────────"
-echo -e "  ${GREEN} 7.${NC} BBR + FQ            ${GREEN} 8.${NC} BBR + FQ_PIE"
-echo -e "  ${GREEN} 9.${NC} BBR + CAKE          ${GREEN}10.${NC} BBRplus + FQ"
-echo ""
-echo -e "  ─────────────── ${CYAN}系统配置${NC} ───────────────"
-echo -e "  ${GREEN}11.${NC} 开启 ECN            ${GREEN}12.${NC} 关闭 ECN"
-echo -e "  ${GREEN}13.${NC} 防CC/DDOS优化        ${GREEN}14.${NC} 禁用 IPv6"
-echo -e "  ${GREEN}15.${NC} 开启 IPv6           ${GREEN}16.${NC} 合并内核参数"
-echo -e "  ${GREEN}17.${NC} 编辑内核参数"
+echo -e "  ─────────────── ${CYAN}TCP 调优${NC} ───────────────"
+echo -e "  ${GREEN} 7.${NC} 生成智能调优画像     ${GREEN} 8.${NC} 查看当前调优画像"
+echo -e "  ${GREEN} 9.${NC} 调优逻辑说明         ${GREEN}10.${NC} 开启 ECN"
+echo -e "  ${GREEN}11.${NC} 关闭 ECN             ${GREEN}12.${NC} 禁用 IPv6"
+echo -e "  ${GREEN}13.${NC} 开启 IPv6           ${GREEN}14.${NC} 合并内核参数"
+echo -e "  ${GREEN}15.${NC} 编辑内核参数"
 echo ""
 echo -e "  ─────────────── ${CYAN}内核管理${NC} ───────────────"
-echo -e "  ${GREEN}18.${NC} 查看已安装内核      ${GREEN}19.${NC} 删除指定内核"
-echo -e "  ${GREEN}20.${NC} 卸载全部加速配置"
+echo -e "  ${GREEN}16.${NC} 查看已安装内核      ${GREEN}17.${NC} 删除指定内核"
+echo -e "  ${GREEN}18.${NC} 卸载全部加速配置"
 echo ""
 echo -e "  ${GREEN} 0.${NC} 返回主菜单"
 echo ""
@@ -1738,21 +1998,18 @@ case $bbr_opt in
 3)  _bbr_install_xanmod main ;;         4)  _bbr_install_debian_cloud ;;
 5)  _bbr_install_official_stable ;;
 6)  _bbr_install_official_latest ;;
-7)  _bbr_clean_accel; _bbr_apply_sysctl fq bbr
-    echo -e "\n${GREEN}[成功] BBR + FQ 已启用！${NC}"; pause_for_enter ;;
-8)  _bbr_clean_accel; _bbr_apply_sysctl fq_pie bbr
-    echo -e "\n${GREEN}[成功] BBR + FQ_PIE 已启用！${NC}"; pause_for_enter ;;
-9)  _bbr_clean_accel; _bbr_apply_sysctl cake bbr
-    echo -e "\n${GREEN}[成功] BBR + CAKE 已启用！${NC}"; pause_for_enter ;;
-10) _bbr_clean_accel; _bbr_apply_sysctl fq bbrplus
-    echo -e "\n${GREEN}[成功] BBRplus + FQ 已启用！${NC}"; pause_for_enter ;;
-11) _bbr_set_ecn 1 ;; 12) _bbr_set_ecn 0 ;;
-13) _bbr_optimizing_ddcc ;; 14) _bbr_ipv6_off ;;
-15) _bbr_ipv6_on ;;
-16) _bbr_sysctl_merge ;;
-17) _bbr_sysctl_edit ;;
-18) _bbr_show_kernels ;; 19) _bbr_delete_kernel ;;
-20) _bbr_remove_all ;;
+7)  _bbr_collect_dynamic_inputs; _bbr_generate_dynamic_profile ;;
+8)  _bbr_show_generated_profile ;;
+9)  _bbr_show_dynamic_plan ;;
+10) _bbr_set_ecn 1 ;;
+11) _bbr_set_ecn 0 ;;
+12) _bbr_ipv6_off ;;
+13) _bbr_ipv6_on ;;
+14) _bbr_sysctl_merge ;;
+15) _bbr_sysctl_edit ;;
+16) _bbr_show_kernels ;;
+17) _bbr_delete_kernel ;;
+18) _bbr_remove_all ;;
 0)  break ;;
 *)  echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
 esac
