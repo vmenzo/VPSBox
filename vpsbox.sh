@@ -2671,6 +2671,7 @@ latency = int(os.environ['LATENCY'])
 mem = int(os.environ['MEM_MB'])
 ramp = float(os.environ['RAMP'])
 cc = os.environ['CC']
+ecn = int(os.environ.get('ECN', '0'))
 qdisc_override = os.environ.get('QDISC','').strip()
 
 base = {
@@ -2701,6 +2702,7 @@ base = {
     'net.ipv4.tcp_stdurg': 0,
     'net.ipv4.tcp_rfc1337': 0,
     'net.ipv4.tcp_syncookies': 1,
+    'net.ipv4.tcp_ecn': ecn,
     'net.ipv4.ip_forward': 0,
     'net.ipv4.ip_local_port_range': '1024 65535',
     'net.ipv4.ip_no_pmtu_disc': 0,
@@ -2822,16 +2824,34 @@ TUNING_VARS=$(PROFILE_JSON="$PROFILE_JSON" python3 - <<'PY'
 import json, os
 obj=json.loads(os.environ['PROFILE_JSON'])
 for k,v in obj.items():
-    print(f"{k}={v}")
+    print(json.dumps({"key": k, "value": v}, ensure_ascii=False))
 PY
 )
 
 modprobe tcp_bbr > /dev/null 2>&1 || true
 
-while IFS='=' read -r key val; do
+while IFS= read -r line; do
+if [ -n "$line" ]; then
+key=$(JSON_LINE="$line" python3 - <<'PY'
+import json, os
+obj = json.loads(os.environ['JSON_LINE'])
+print(obj['key'])
+PY
+)
+val=$(JSON_LINE="$line" python3 - <<'PY'
+import json, os
+obj = json.loads(os.environ['JSON_LINE'])
+value = obj['value']
+if isinstance(value, str):
+    print(value)
+else:
+    print(json.dumps(value, ensure_ascii=False))
+PY
+)
 if [ -n "$key" ] && [ -n "$val" ]; then
 if sysctl -w "$key=$val" >/dev/null 2>&1; then
-echo "$key = $val" >> "$CUSTOM_CONF"
+printf '%s = %s\n' "$key" "$val" >> "$CUSTOM_CONF"
+fi
 fi
 fi
 done <<< "$TUNING_VARS"
