@@ -1227,8 +1227,6 @@ else
 fi
 }
 
-manage_bbr() {
-
 _bbr_check_sys() {
   BBR_ARCH=$(uname -m)
   BBR_OS_ID=""; BBR_OS_TYPE=""; BBR_OS_VER=""; BBR_OS_LIKE=""
@@ -1534,6 +1532,8 @@ _tcp_profile_collect_inputs() {
   current_val=$(_bbr_clamp "$current_val" 64 32768)
   eval "${prefix}_MEMORY_MB=$current_val"
 }
+
+manage_bbr() {
 
 _bbr_collect_dynamic_inputs() {
   _tcp_profile_collect_inputs "BBR_TUNE" "bbr" "0"
@@ -2604,6 +2604,12 @@ w_ram="$TCPRUN_MEMORY_MB"
 tune_ecn="$TCPRUN_ECN"
 
 if ! confirm_action "执行并使上述 TCP 调优参数生效"; then pause_for_enter; return; fi
+
+if [[ -z "$local_bw" || -z "$server_bw" || -z "$latency" || -z "$ramp_up" || -z "$bbr_ver" || -z "$qdisc" || -z "$w_ram" || -z "$tune_ecn" ]]; then
+  echo -e "\n${RED}[错误] 调优参数采集失败，已取消本次应用。${NC}"
+  pause_for_enter
+  return
+fi
 
 read -r -p "> 是否在调优前备份当前参数？(y/n, 默认 y): " NEED_BACKUP
 NEED_BACKUP="${NEED_BACKUP// /}"
