@@ -1580,6 +1580,22 @@ def tcpcong(x, mode, scale):
 def memory_cap(target, mem_mb, frac):
     return min(target, int(1024 * mem_mb * 1024 * frac))
 
+def clamp_tcp_window_scale(value):
+    return int(clamp(value, -31, 31))
+
+def clamp_kernel_buffer(value):
+    return int(clamp(math.floor(value), 4096, 1073741824))
+
+def clamp_tcp_triplet(min_value, default_value, max_value):
+    min_value = clamp_kernel_buffer(min_value)
+    default_value = clamp_kernel_buffer(default_value)
+    max_value = clamp_kernel_buffer(max_value)
+    if default_value < min_value:
+        default_value = min_value
+    if max_value < default_value:
+        max_value = default_value
+    return f'{min_value} {default_value} {max_value}'
+
 local_bw = int(os.environ['LOCAL_BW'])
 vps_bw = int(os.environ['VPS_BW'])
 latency = int(os.environ['LATENCY'])
@@ -1697,12 +1713,13 @@ if latency <= 120:
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'slow_start', 1) * memory_efficiency * buffer_aggression * burst_handling, 0.5, 3)
     queue_factor = clamp((math.log(qtheory(T / 65536 * conn_density, latency / 1000 * 2, 0.8 * curve1) + 1) / math.log(1000)) * queue_pref * (1 + jitter_tolerance), 0.3, 2)
     adv_factor = max(0, math.ceil(math.log2(max(1, 2 * math.ceil(T * latency / 1000) / 65535))))
-    adv_win_scale = max(2, math.ceil(clamp(latency_factor / latency_sensitivity * adv_factor * win_base * curve1, 1, win_max)))
+    adv_win_scale = clamp_tcp_window_scale(max(2, math.ceil(clamp(latency_factor / latency_sensitivity * adv_factor * win_base * curve1, 1, win_max))))
 
     Vmul = 2.5 if mem <= 256 else 3 if mem <= 512 else 4
     Hmul = 1.2 if mem <= 256 else 1.5 if mem <= 1024 else 2
-    tcp_rmem_max = min(math.floor(P * Vmul * buffer_factor), U)
-    tcp_wmem_max = min(math.floor(P * Hmul * buffer_factor), U)
+    U = clamp_kernel_buffer(U)
+    tcp_rmem_max = clamp_kernel_buffer(min(math.floor(P * Vmul * buffer_factor), U))
+    tcp_wmem_max = clamp_kernel_buffer(min(math.floor(P * Hmul * buffer_factor), U))
     Q = math.ceil(min(2 * max(100, T / 65536), 10000) * queue_factor)
     X = 0.6 if mem <= 256 else 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.2
     somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
@@ -1726,8 +1743,8 @@ if latency <= 120:
         'net.core.somaxconn': somaxconn,
         'net.core.optmem_max': math.floor(min(65536, P / 4)),
         'net.ipv4.tcp_fack': 0,
-        'net.ipv4.tcp_rmem': f'8192 87380 {tcp_rmem_max}',
-        'net.ipv4.tcp_wmem': f'8192 65536 {tcp_wmem_max}',
+        'net.ipv4.tcp_rmem': clamp_tcp_triplet(8192, 87380, tcp_rmem_max),
+        'net.ipv4.tcp_wmem': clamp_tcp_triplet(8192, 65536, tcp_wmem_max),
         'net.ipv4.tcp_notsent_lowat': 4096,
         'net.ipv4.tcp_adv_win_scale': adv_win_scale,
         'net.ipv4.tcp_no_metrics_save': 0,
@@ -1817,8 +1834,9 @@ else:
     else:
         K = clamp(2 * F, 5, 10) * buffer_factor
         Q = clamp(2 * F, 5, 10)
-    tcp_rmem_max = min(math.floor(L * Q), W)
-    tcp_wmem_max = min(math.floor(L * K), W)
+    W = clamp_kernel_buffer(W)
+    tcp_rmem_max = clamp_kernel_buffer(min(math.floor(L * Q), W))
+    tcp_wmem_max = clamp_kernel_buffer(min(math.floor(L * K), W))
     J = math.ceil(min(3 * max(50, S / 131072), 20000) * queue_factor)
     Z = 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.3 if mem <= 2048 else 1.5
     somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
@@ -1841,10 +1859,10 @@ else:
         'net.core.somaxconn': somaxconn,
         'net.core.optmem_max': math.floor(min(262144, L / 2)),
         'net.ipv4.tcp_fack': 1,
-        'net.ipv4.tcp_rmem': f'32768 262144 {tcp_rmem_max}',
-        'net.ipv4.tcp_wmem': f'32768 262144 {tcp_wmem_max}',
+        'net.ipv4.tcp_rmem': clamp_tcp_triplet(32768, 262144, tcp_rmem_max),
+        'net.ipv4.tcp_wmem': clamp_tcp_triplet(32768, 262144, tcp_wmem_max),
         'net.ipv4.tcp_notsent_lowat': math.floor(min(L / 2, 524288)),
-        'net.ipv4.tcp_adv_win_scale': max(2, math.ceil(F * adv_component)),
+        'net.ipv4.tcp_adv_win_scale': clamp_tcp_window_scale(max(2, math.ceil(F * adv_component))),
         'net.ipv4.tcp_no_metrics_save': 1,
         'net.ipv4.tcp_max_syn_backlog': max_syn,
         'net.ipv4.tcp_max_orphans': 16384 if mem <= 256 else 32768,
@@ -2625,6 +2643,22 @@ def tcpcong(x, mode, scale):
 def memory_cap(target, mem_mb, frac):
     return min(target, int(1024 * mem_mb * 1024 * frac))
 
+def clamp_tcp_window_scale(value):
+    return int(clamp(value, -31, 31))
+
+def clamp_kernel_buffer(value):
+    return int(clamp(math.floor(value), 4096, 1073741824))
+
+def clamp_tcp_triplet(min_value, default_value, max_value):
+    min_value = clamp_kernel_buffer(min_value)
+    default_value = clamp_kernel_buffer(default_value)
+    max_value = clamp_kernel_buffer(max_value)
+    if default_value < min_value:
+        default_value = min_value
+    if max_value < default_value:
+        max_value = default_value
+    return f'{min_value} {default_value} {max_value}'
+
 local_bw = int(os.environ['LOCAL_BW'])
 vps_bw = int(os.environ['VPS_BW'])
 latency = int(os.environ['LATENCY'])
@@ -2711,11 +2745,12 @@ if latency <= 120:
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'slow_start', 1) * memory_efficiency * buffer_aggression * burst_handling, 0.5, 3)
     queue_factor = clamp((math.log(qtheory(T / 65536 * conn_density, latency / 1000 * 2, 0.8 * curve1) + 1) / math.log(1000)) * queue_pref * (1 + jitter_tolerance), 0.3, 2)
     adv_factor = max(0, math.ceil(math.log2(max(1, 2 * math.ceil(T * latency / 1000) / 65535))))
-    adv_win_scale = max(2, math.ceil(clamp(latency_factor / latency_sensitivity * adv_factor * win_base * curve1, 1, win_max)))
+    adv_win_scale = clamp_tcp_window_scale(max(2, math.ceil(clamp(latency_factor / latency_sensitivity * adv_factor * win_base * curve1, 1, win_max))))
     Vmul = 2.5 if mem <= 256 else 3 if mem <= 512 else 4
     Hmul = 1.2 if mem <= 256 else 1.5 if mem <= 1024 else 2
-    tcp_rmem_max = min(math.floor(P * Vmul * buffer_factor), U)
-    tcp_wmem_max = min(math.floor(P * Hmul * buffer_factor), U)
+    U = clamp_kernel_buffer(U)
+    tcp_rmem_max = clamp_kernel_buffer(min(math.floor(P * Vmul * buffer_factor), U))
+    tcp_wmem_max = clamp_kernel_buffer(min(math.floor(P * Hmul * buffer_factor), U))
     Q = math.ceil(min(2 * max(100, T / 65536), 10000) * queue_factor)
     X = 0.6 if mem <= 256 else 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.2
     somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
@@ -2763,8 +2798,9 @@ else:
         K = clamp(1.8 * F, 4, 8) * buffer_factor; Q = clamp(1.8 * F, 4, 8)
     else:
         K = clamp(2 * F, 5, 10) * buffer_factor; Q = clamp(2 * F, 5, 10)
-    tcp_rmem_max = min(math.floor(L * Q), W)
-    tcp_wmem_max = min(math.floor(L * K), W)
+    W = clamp_kernel_buffer(W)
+    tcp_rmem_max = clamp_kernel_buffer(min(math.floor(L * Q), W))
+    tcp_wmem_max = clamp_kernel_buffer(min(math.floor(L * K), W))
     J = math.ceil(min(3 * max(50, S / 131072), 20000) * queue_factor)
     Z = 0.8 if mem <= 512 else 1 if mem <= 1024 else 1.3 if mem <= 2048 else 1.5
     somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
