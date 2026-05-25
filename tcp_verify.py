@@ -98,10 +98,21 @@ def medium_mem_buffer_cap(latency_ms, mem_mb):
     if mem_mb <= 2048:
         return 256 * 1024 * 1024 if latency_ms > 1100 else 192 * 1024 * 1024 if latency_ms > 800 else 128 * 1024 * 1024
     if mem_mb <= 4096:
-        return 512 * 1024 * 1024 if latency_ms > 1300 else 384 * 1024 * 1024 if latency_ms > 900 else 256 * 1024 * 1024
+        return 384 * 1024 * 1024 if latency_ms > 1300 else 320 * 1024 * 1024 if latency_ms > 900 else 224 * 1024 * 1024
     if mem_mb <= 8192:
+        return 640 * 1024 * 1024 if latency_ms > 1300 else 512 * 1024 * 1024 if latency_ms > 900 else 384 * 1024 * 1024
+    if mem_mb <= 32768:
         return 768 * 1024 * 1024 if latency_ms > 1300 else 640 * 1024 * 1024 if latency_ms > 900 else 512 * 1024 * 1024
-    return None
+    return 896 * 1024 * 1024 if latency_ms > 1300 else 768 * 1024 * 1024
+
+
+def tuned_min_free_kbytes(mem_mb, target_kbytes, high_latency=False):
+    floor = 16384 if mem_mb <= 64 else 24576 if mem_mb <= 128 else 32768 if mem_mb <= 256 else 49152 if mem_mb <= 512 else 65536
+    ceiling = int(mem_mb * (384 if mem_mb <= 128 else 320 if mem_mb <= 256 else 256 if mem_mb <= 512 else 192 if mem_mb <= 1024 else 160))
+    if high_latency:
+        ceiling = int(ceiling * 1.15)
+    ceiling = max(floor, min(1048576, ceiling))
+    return int(clamp(target_kbytes, floor, ceiling))
 
 
 def current_vpsbox_profile(local_bw, vps_bw, latency, mem, ramp, cc, ecn):
@@ -223,7 +234,7 @@ def current_vpsbox_profile(local_bw, vps_bw, latency, mem, ramp, cc, ecn):
         somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
         backlog = int(clamp(math.floor(0.4 * Q * X), 2000, 4000))
         max_syn = int(clamp(math.floor(0.8 * Q * X), 2048, 16384))
-        min_free = int(clamp(math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03)) + math.floor(0.5 * math.ceil(T / 1024)), 32768, 1048576))
+        min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03) + math.floor(0.5 * math.ceil(T / 1024))), high_latency=False)
         data = {
             **base,
             'mode': mode,
@@ -326,12 +337,11 @@ def current_vpsbox_profile(local_bw, vps_bw, latency, mem, ramp, cc, ecn):
                 W = min(W, medium_cap)
         curve1 = clamp((math.log(ramp * (math.e - 1) + 1) / math.log(math.e)) * stability * (buffer_aggression / 2), 0.5, 3)
         latency_input = min(1, (latency - 120) / 1880)
-        latency_ramp = clamp((latency - 120) / 680, 0, 1)
         latency_factor = clamp((math.log(latency_input * (latency_curve_tolerance - 1) + 1) / math.log(latency_curve_tolerance)) * latency_tolerance * curve1 if latency_input > 0 else 0, 1, 8)
         buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
         queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
         adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
-        adv_component = clamp(latency_factor / (latency_tolerance * (2.8 - 0.7 * latency_ramp)) * adv_factor * (win_base * (0.32 + 0.18 * latency_ramp)) * ((0.75 + 0.35 * latency_ramp) * curve1 + (0.42 + 0.18 * latency_ramp)), 2, max(4, math.ceil(win_max - (5 - 2 * latency_ramp))))
+        adv_component = clamp(latency_factor / (latency_tolerance * 1.75) * adv_factor * (win_base * 0.65) * (1.35 * curve1 + 0.75), 2, max(4, win_max - 3))
         if mem <= 512:
             K = clamp(1.5 * F, 3, 6) * buffer_factor
             Q = clamp(1.5 * F, 3, 6)
@@ -349,7 +359,7 @@ def current_vpsbox_profile(local_bw, vps_bw, latency, mem, ramp, cc, ecn):
         somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
         backlog = int(clamp(math.floor(0.3 * J * Z), 8192, 16384 if mem <= 512 else 32768))
         max_syn = int(clamp(math.floor(0.6 * J * Z), 8192, 32768 if mem <= 512 else 65536))
-        min_free = int(clamp(math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035)) + math.floor(0.6 * math.ceil(S / 1024)), 65536, 1048576))
+        min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024))), high_latency=True)
         data = {
             **base,
             'mode': mode,

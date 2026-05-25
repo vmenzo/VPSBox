@@ -75,10 +75,12 @@ def medium_mem_buffer_cap(latency_ms, mem_mb):
     if mem_mb <= 2048:
         return 256 * 1024 * 1024 if latency_ms > 1100 else 192 * 1024 * 1024 if latency_ms > 800 else 128 * 1024 * 1024
     if mem_mb <= 4096:
-        return 512 * 1024 * 1024 if latency_ms > 1300 else 384 * 1024 * 1024 if latency_ms > 900 else 256 * 1024 * 1024
+        return 384 * 1024 * 1024 if latency_ms > 1300 else 320 * 1024 * 1024 if latency_ms > 900 else 224 * 1024 * 1024
     if mem_mb <= 8192:
+        return 640 * 1024 * 1024 if latency_ms > 1300 else 512 * 1024 * 1024 if latency_ms > 900 else 384 * 1024 * 1024
+    if mem_mb <= 32768:
         return 768 * 1024 * 1024 if latency_ms > 1300 else 640 * 1024 * 1024 if latency_ms > 900 else 512 * 1024 * 1024
-    return None
+    return 896 * 1024 * 1024 if latency_ms > 1300 else 768 * 1024 * 1024
 
 def tuned_min_free_kbytes(mem_mb, target_kbytes, high_latency=False):
     floor = 16384 if mem_mb <= 64 else 24576 if mem_mb <= 128 else 32768 if mem_mb <= 256 else 49152 if mem_mb <= 512 else 65536
@@ -240,7 +242,7 @@ def profile(local_bw, vps_bw, latency, mem, ramp):
     buffer_factor = clamp(latency_factor * tcpcong(curve1, 'congestion_avoidance', 10) * throughput_priority * buffer_aggression * memory_util * piecewise(curve1, [(0,1),(0.3,1.5),(0.6,2.5),(1,4)]), 1, 8)
     queue_factor = clamp(latency_factor / 3 * (math.log(qtheory(S / 131072 * conn_scaling, latency / 1000 * 3, min(0.9, 0.85 * curve1)) + 1) / math.log(10000) * queue_depth), 0.8, 4)
     adv_factor = max(0, math.ceil(math.log2(max(1, 4 * math.ceil(S * latency / 1000) / 65535))))
-    adv_component = clamp(latency_factor / (latency_tolerance * (2.8 - 0.7 * latency_ramp)) * adv_factor * (win_base * (0.32 + 0.18 * latency_ramp)) * ((0.75 + 0.35 * latency_ramp) * curve1 + (0.42 + 0.18 * latency_ramp)), 2, max(4, math.ceil(win_max - (5 - 2 * latency_ramp))))
+    adv_component = clamp(latency_factor / (latency_tolerance * 1.75) * adv_factor * (win_base * 0.65) * (1.35 * curve1 + 0.75), 2, max(4, win_max - 3))
     if mem <= 512:
         K = clamp(1.5 * F, 3, 6) * buffer_factor
         Q = clamp(1.5 * F, 3, 6)

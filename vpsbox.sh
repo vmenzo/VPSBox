@@ -1613,10 +1613,12 @@ def medium_mem_buffer_cap(latency_ms, mem_mb):
     if mem_mb <= 2048:
         return 256 * 1024 * 1024 if latency_ms > 1100 else 192 * 1024 * 1024 if latency_ms > 800 else 128 * 1024 * 1024
     if mem_mb <= 4096:
-        return 512 * 1024 * 1024 if latency_ms > 1300 else 384 * 1024 * 1024 if latency_ms > 900 else 256 * 1024 * 1024
+        return 384 * 1024 * 1024 if latency_ms > 1300 else 320 * 1024 * 1024 if latency_ms > 900 else 224 * 1024 * 1024
     if mem_mb <= 8192:
+        return 640 * 1024 * 1024 if latency_ms > 1300 else 512 * 1024 * 1024 if latency_ms > 900 else 384 * 1024 * 1024
+    if mem_mb <= 32768:
         return 768 * 1024 * 1024 if latency_ms > 1300 else 640 * 1024 * 1024 if latency_ms > 900 else 512 * 1024 * 1024
-    return None
+    return 896 * 1024 * 1024 if latency_ms > 1300 else 768 * 1024 * 1024
 
 def tuned_min_free_kbytes(mem_mb, target_kbytes, high_latency=False):
     floor = 16384 if mem_mb <= 64 else 24576 if mem_mb <= 128 else 32768 if mem_mb <= 256 else 49152 if mem_mb <= 512 else 65536
@@ -1755,7 +1757,7 @@ if latency <= 120:
     somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
     backlog = int(clamp(math.floor(0.4 * Q * X), 2000, 4000))
     max_syn = int(clamp(math.floor(0.8 * Q * X), 2048, 16384))
-    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03) + math.floor(0.5 * math.ceil(T / 1024)), high_latency=False)
+    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03) + math.floor(0.5 * math.ceil(T / 1024))), high_latency=False)
 
     data = {
         **base,
@@ -1879,7 +1881,7 @@ else:
     somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
     backlog = int(clamp(math.floor(0.3 * J * Z), 8192, 16384 if mem <= 512 else 32768))
     max_syn = int(clamp(math.floor(0.6 * J * Z), 8192, 32768 if mem <= 512 else 65536))
-    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024)), high_latency=True)
+    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024))), high_latency=True)
     data = {
         **base,
         'mode': mode,
@@ -2719,10 +2721,12 @@ def medium_mem_buffer_cap(latency_ms, mem_mb):
     if mem_mb <= 2048:
         return 256 * 1024 * 1024 if latency_ms > 1100 else 192 * 1024 * 1024 if latency_ms > 800 else 128 * 1024 * 1024
     if mem_mb <= 4096:
-        return 512 * 1024 * 1024 if latency_ms > 1300 else 384 * 1024 * 1024 if latency_ms > 900 else 256 * 1024 * 1024
+        return 384 * 1024 * 1024 if latency_ms > 1300 else 320 * 1024 * 1024 if latency_ms > 900 else 224 * 1024 * 1024
     if mem_mb <= 8192:
+        return 640 * 1024 * 1024 if latency_ms > 1300 else 512 * 1024 * 1024 if latency_ms > 900 else 384 * 1024 * 1024
+    if mem_mb <= 32768:
         return 768 * 1024 * 1024 if latency_ms > 1300 else 640 * 1024 * 1024 if latency_ms > 900 else 512 * 1024 * 1024
-    return None
+    return 896 * 1024 * 1024 if latency_ms > 1300 else 768 * 1024 * 1024
 
 def tuned_min_free_kbytes(mem_mb, target_kbytes, high_latency=False):
     floor = 16384 if mem_mb <= 64 else 24576 if mem_mb <= 128 else 32768 if mem_mb <= 256 else 49152 if mem_mb <= 512 else 65536
@@ -2831,7 +2835,7 @@ if latency <= 120:
     somaxconn = int(clamp(math.floor(0.2 * Q * X), 256, 2048))
     backlog = int(clamp(math.floor(0.4 * Q * X), 2000, 4000))
     max_syn = int(clamp(math.floor(0.8 * Q * X), 2048, 16384))
-    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03) + math.floor(0.5 * math.ceil(T / 1024)), high_latency=False)
+    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.015 if mem <= 256 else 0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03) + math.floor(0.5 * math.ceil(T / 1024))), high_latency=False)
     data = {**base,'net.core.default_qdisc':qdisc,'vm.swappiness':10,'vm.dirty_ratio':10,'vm.dirty_background_ratio':5,'vm.min_free_kbytes':min_free,'net.core.netdev_max_backlog':backlog,'net.core.rmem_max':U,'net.core.wmem_max':U,'net.core.rmem_default':87380,'net.core.wmem_default':65536,'net.core.somaxconn':somaxconn,'net.core.optmem_max':math.floor(min(65536, P / 4)),'net.ipv4.tcp_fack':0,'net.ipv4.tcp_rmem':f'8192 87380 {tcp_rmem_max}','net.ipv4.tcp_wmem':f'8192 65536 {tcp_wmem_max}','net.ipv4.tcp_notsent_lowat':4096,'net.ipv4.tcp_adv_win_scale':adv_win_scale,'net.ipv4.tcp_no_metrics_save':0,'net.ipv4.tcp_max_syn_backlog':max_syn,'net.ipv4.tcp_max_orphans':65536,'net.ipv4.tcp_synack_retries':2,'net.ipv4.tcp_syn_retries':3,'net.ipv4.neigh.default.gc_thresh1':1024,'net.ipv4.neigh.default.gc_thresh2':4096,'net.ipv4.neigh.default.gc_thresh3':8192}
 else:
     qdisc = qdisc_override or 'fq'
@@ -2888,7 +2892,7 @@ else:
     somaxconn = int(clamp(math.floor(0.15 * J * Z), 2560, 8192 if mem <= 512 else 16384))
     backlog = int(clamp(math.floor(0.3 * J * Z), 8192, 16384 if mem <= 512 else 32768))
     max_syn = int(clamp(math.floor(0.6 * J * Z), 8192, 32768 if mem <= 512 else 65536))
-    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024)), high_latency=True)
+    min_free = tuned_min_free_kbytes(mem, math.floor(1024 * mem * (0.02 if mem <= 512 else 0.025 if mem <= 1024 else 0.03 if mem <= 2048 else 0.035) + math.floor(0.6 * math.ceil(S / 1024))), high_latency=True)
     data = {**base,'net.core.default_qdisc':qdisc,'vm.swappiness':5,'vm.dirty_ratio':5,'vm.dirty_background_ratio':2,'vm.min_free_kbytes':min_free,'net.core.netdev_max_backlog':backlog,'net.core.rmem_max':W,'net.core.wmem_max':W,'net.core.rmem_default':262144,'net.core.wmem_default':262144,'net.core.somaxconn':somaxconn,'net.core.optmem_max':math.floor(min(262144, L / 2)),'net.ipv4.tcp_fack':1,'net.ipv4.tcp_rmem':f'32768 262144 {tcp_rmem_max}','net.ipv4.tcp_wmem':f'32768 262144 {tcp_wmem_max}','net.ipv4.tcp_notsent_lowat':math.floor(min(L / 2, 524288)),'net.ipv4.tcp_adv_win_scale':max(2, math.ceil(F * adv_component)),'net.ipv4.tcp_no_metrics_save':1,'net.ipv4.tcp_max_syn_backlog':max_syn,'net.ipv4.tcp_max_orphans':16384 if mem <= 256 else 32768,'net.ipv4.tcp_synack_retries':2,'net.ipv4.tcp_syn_retries':2,'net.ipv4.neigh.default.gc_thresh1':256 if mem <= 512 else 512,'net.ipv4.neigh.default.gc_thresh2':1024 if mem <= 512 else 2048,'net.ipv4.neigh.default.gc_thresh3':2048 if mem <= 512 else 4096}
 print(json.dumps(data, ensure_ascii=False))
 PY

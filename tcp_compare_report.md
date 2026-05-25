@@ -43,7 +43,7 @@
   - net.core.wmem_max: 18991967
   - net.ipv4.tcp_rmem: 32768 262144 18991967
   - net.ipv4.tcp_wmem: 32768 262144 18991967
-  - net.ipv4.tcp_adv_win_scale: 9
+  - net.ipv4.tcp_adv_win_scale: 23
   - net.core.somaxconn: 2560
   - net.core.netdev_max_backlog: 8192
 - high-latency-high-mem: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
@@ -52,7 +52,7 @@
   - net.core.wmem_max: 91750400
   - net.ipv4.tcp_rmem: 32768 262144 91750400
   - net.ipv4.tcp_wmem: 32768 262144 91750400
-  - net.ipv4.tcp_adv_win_scale: 22
+  - net.ipv4.tcp_adv_win_scale: 31
   - net.core.somaxconn: 2560
   - net.core.netdev_max_backlog: 8192
 - very-high-latency: mode=高延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0
@@ -61,7 +61,7 @@
   - net.core.wmem_max: 33158884
   - net.ipv4.tcp_rmem: 32768 262144 33158884
   - net.ipv4.tcp_wmem: 32768 262144 33158884
-  - net.ipv4.tcp_adv_win_scale: 30
+  - net.ipv4.tcp_adv_win_scale: 31
   - net.core.somaxconn: 2560
   - net.core.netdev_max_backlog: 8192
 - clamp-low-inputs: mode=低延迟画像, apply=1.000000, readback_all=1.000000, mismatches=0, failed_writes=0

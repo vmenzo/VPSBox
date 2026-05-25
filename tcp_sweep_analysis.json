@@ -1,57 +1,59 @@
 {
   "issue_counts": {
-    "adv_win_scale_saturated_sub500ms": 12,
-    "kernel_buffer_cap_hit": 27
+    "adv_win_scale_saturated_early": 267,
+    "adv_win_scale_saturated_sub500ms": 275
   },
   "examples": {
-    "adv_win_scale_saturated_sub500ms": {
+    "adv_win_scale_saturated_early": {
       "case": {
-        "local_bw": 300,
-        "vps_bw": 1000,
-        "latency": 350,
-        "mem": 4096,
+        "local_bw": 5,
+        "vps_bw": 10,
+        "latency": 180,
+        "mem": 2048,
         "ramp": 1.0
       },
       "profile": {
         "mode": "high",
         "qdisc": "fq",
-        "rmem_max": 137625600,
-        "wmem_max": 137625600,
+        "rmem_max": 943720,
+        "wmem_max": 943720,
         "somaxconn": 2560,
         "backlog": 8192,
         "max_syn": 8192,
-        "min_free": 262000,
-        "tcp_rmem": "32768 262144 137625600",
-        "tcp_wmem": "32768 262144 137625600",
+        "min_free": 65536,
+        "tcp_rmem": "32768 262144 943720",
+        "tcp_wmem": "32768 262144 943720",
         "adv": 31
       },
       "issues": [
+        "adv_win_scale_saturated_early",
         "adv_win_scale_saturated_sub500ms"
       ]
     },
-    "kernel_buffer_cap_hit": {
+    "adv_win_scale_saturated_sub500ms": {
       "case": {
-        "local_bw": 1000,
-        "vps_bw": 10000,
-        "latency": 1500,
-        "mem": 32768,
+        "local_bw": 5,
+        "vps_bw": 10,
+        "latency": 180,
+        "mem": 2048,
         "ramp": 1.0
       },
       "profile": {
         "mode": "high",
         "qdisc": "fq",
-        "rmem_max": 1073741824,
-        "wmem_max": 1073741824,
-        "somaxconn": 8538,
-        "backlog": 17076,
-        "max_syn": 34153,
-        "min_free": 1048576,
-        "tcp_rmem": "32768 262144 1073741824",
-        "tcp_wmem": "32768 262144 1073741824",
+        "rmem_max": 943720,
+        "wmem_max": 943720,
+        "somaxconn": 2560,
+        "backlog": 8192,
+        "max_syn": 8192,
+        "min_free": 65536,
+        "tcp_rmem": "32768 262144 943720",
+        "tcp_wmem": "32768 262144 943720",
         "adv": 31
       },
       "issues": [
-        "kernel_buffer_cap_hit"
+        "adv_win_scale_saturated_early",
+        "adv_win_scale_saturated_sub500ms"
       ]
     }
   },
@@ -82,50 +84,51 @@
     "rmem_max": {
       "case": {
         "local_bw": 1000,
-        "vps_bw": 10000,
-        "latency": 1500,
+        "vps_bw": 1000,
+        "latency": 2000,
         "mem": 32768,
         "ramp": 1.0
       },
       "profile": {
         "mode": "high",
         "qdisc": "fq",
-        "rmem_max": 1073741824,
-        "wmem_max": 1073741824,
-        "somaxconn": 8538,
-        "backlog": 17076,
-        "max_syn": 34153,
+        "rmem_max": 805306368,
+        "wmem_max": 805306368,
+        "somaxconn": 5400,
+        "backlog": 10800,
+        "max_syn": 21600,
         "min_free": 1048576,
-        "tcp_rmem": "32768 262144 1073741824",
-        "tcp_wmem": "32768 262144 1073741824",
+        "tcp_rmem": "32768 262144 805306368",
+        "tcp_wmem": "32768 262144 805306368",
         "adv": 31
       },
-      "issues": [
-        "kernel_buffer_cap_hit"
-      ]
+      "issues": []
     },
     "adv_max": {
       "case": {
         "local_bw": 5,
         "vps_bw": 10,
-        "latency": 800,
+        "latency": 180,
         "mem": 2048,
         "ramp": 1.0
       },
       "profile": {
         "mode": "high",
         "qdisc": "fq",
-        "rmem_max": 4194304,
-        "wmem_max": 4194304,
+        "rmem_max": 943720,
+        "wmem_max": 943720,
         "somaxconn": 2560,
         "backlog": 8192,
         "max_syn": 8192,
         "min_free": 65536,
-        "tcp_rmem": "32768 262144 4194304",
-        "tcp_wmem": "32768 262144 4194304",
+        "tcp_rmem": "32768 262144 943720",
+        "tcp_wmem": "32768 262144 943720",
         "adv": 31
       },
-      "issues": []
+      "issues": [
+        "adv_win_scale_saturated_early",
+        "adv_win_scale_saturated_sub500ms"
+      ]
     },
     "min_free_max": {
       "case": {
@@ -146,7 +149,7 @@
         "min_free": 1048576,
         "tcp_rmem": "32768 262144 262144",
         "tcp_wmem": "32768 262144 262144",
-        "adv": 9
+        "adv": 18
       },
       "issues": []
     }
