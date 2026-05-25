@@ -124,13 +124,30 @@ ffmpeg  btop  ranger  ncdu  fzf  vim  nano  git
 
 #### 节点部署
 
-三协议一键部署，终端直接展示二维码手机扫码导入。自动检测 Xray / Sing-box 双核心，首次自动安装，配置写入后语法核验并重启服务。
+四协议一键部署，终端直接展示二维码手机扫码导入。自动检测 Xray / Sing-box 双核心，首次自动安装。节点管理采用“单端口单文件片段 + 共用核心”架构：每个节点独立写入 `nodes.d` 目录，再合并生成主配置并优先执行热重载，避免新增/删除节点时整体重启影响旧连接。
 
 | 协议 | 传输 | 伪装 | 域名 | 适用场景 |
 |------|------|------|------|----------|
 | VLESS-Reality | TCP + xtls-rprx-vision | 偷大厂 TLS | 不需要 | 防封锁首选，零配置 |
 | VLESS-WS-TLS | WebSocket + TLS | 自有域名证书 | 需要 | 套 CDN，兼容性好 |
+| AnyTLS | TLS | 自有域名证书 | 需要 | sing-box 专属，密码认证，结构简洁 |
 | Hysteria2 | QUIC / UDP | 自签证书 | 需要 | 暴力发包，低延迟 |
+
+**新的节点配置结构**
+
+- Xray 主配置：`/usr/local/etc/xray/config.json`
+- Sing-box 主配置：`/etc/sing-box/config.json`
+- Xray 节点片段目录：`/usr/local/etc/xray/nodes.d/`
+- Sing-box 节点片段目录：`/etc/sing-box/nodes.d/`
+- 节点元数据：`/etc/vpsbox_node_runtime/`
+
+每创建一个节点，都会生成类似 `443-vless-ws-tls.json` 这样的独立片段文件；脚本将所有片段合并成主配置后进行语法校验，并优先使用热重载生效。若热重载失败，脚本不会为了上线新节点而强制重启核心，从而尽量保护旧连接不断开。
+
+**热重载兼容性说明**
+
+- Xray：脚本会确保 systemd 服务包含 `ExecReload=/bin/kill -HUP $MAINPID`，新增/删除节点后优先热重载。
+- Sing-box：脚本同样会为 `sing-box.service` 补齐 `ExecReload=/bin/kill -HUP $MAINPID`，并优先执行 `systemctl reload` / `HUP`。
+- 若热重载失败：脚本会直接报错并保留当前运行中的旧连接，不会为了让新配置生效而偷偷重启核心。
 
 **IP 质量检测**
 

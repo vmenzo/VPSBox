@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.1 — 菜单编号审计收尾与脚本管理顺延至 22
+# 版本: v1.7.2 — 节点部署回滚、证书校验与热重载安全性修复
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.1"
+VPSBOX_VERSION="v1.7.2"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -409,6 +409,41 @@ EOF
   fi
 }
 
+_ensure_singbox_service_reload_support() {
+  if [ ! -d /etc/systemd/system ]; then return 0; fi
+  local bin_path
+  bin_path=$(command -v sing-box || echo "/usr/local/bin/sing-box")
+  if [ ! -x "$bin_path" ]; then return 0; fi
+  if [ ! -f "$SINGBOX_SERVICE_FILE" ]; then
+    cat > "$SINGBOX_SERVICE_FILE" <<EOF
+[Unit]
+Description=sing-box Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+ExecStart=${bin_path} run -c ${SINGBOX_CONFIG_FILE}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=500
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    _svc_daemon_reload >/dev/null 2>&1 || true
+  elif ! grep -q '^ExecReload=' "$SINGBOX_SERVICE_FILE"; then
+    local tmp_service; tmp_service=$(mktemp) || return 0
+    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP \\$MAINPID"}' "$SINGBOX_SERVICE_FILE" > "$tmp_service"; then
+      mv "$tmp_service" "$SINGBOX_SERVICE_FILE"
+      _svc_daemon_reload >/dev/null 2>&1 || true
+    else
+      rm -f "$tmp_service"
+    fi
+  fi
+}
+
 _emit_xray_merged_config() {
   local tmp_out="$1"
   mkdir -p "$XRAY_NODES_DIR" "$XRAY_RUNTIME_DIR"
@@ -475,6 +510,8 @@ _reload_core_without_disconnect() {
   local service_name; service_name=$(_service_name_for_core "$core_name") || return 1
   if [ "$core_name" == "Xray" ]; then
     _ensure_xray_service_reload_support
+  elif [ "$core_name" == "Sing-box" ]; then
+    _ensure_singbox_service_reload_support
   fi
   if _svc_is_active "$service_name" 2>/dev/null; then
     if _svc_reload "$service_name"; then
@@ -544,23 +581,36 @@ persist_node_runtime() {
 
 remove_node_runtime() {
   local core_name="$1" port="$2"
-  local meta_file fragment_file
+  local meta_file fragment_file node_dir backup_fragment
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
+  node_dir=$(_node_dir_for_core "$core_name") || return 1
   fragment_file=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
-  if [ -n "$fragment_file" ] && [ -f "$fragment_file" ]; then
-    rm -f "$fragment_file"
-  else
-    local node_dir; node_dir=$(_node_dir_for_core "$core_name") || return 1
-    rm -f "$node_dir/${port}.json" "$node_dir/${port}-"*.json 2>/dev/null || true
+  if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
+    shopt -s nullglob
+    local matches=("$node_dir/${port}-"*.json "$node_dir/${port}.json")
+    shopt -u nullglob
+    if [ ${#matches[@]} -eq 0 ]; then
+      echo -e "${RED}[错误] 未找到端口 $port 对应的节点片段文件。${NC}"
+      return 1
+    fi
+    fragment_file="${matches[0]}"
   fi
+  backup_fragment="${fragment_file}.bak.$$"
+  mv "$fragment_file" "$backup_fragment" || return 1
   if ! rebuild_core_config "$core_name"; then
-    echo -e "${RED}[错误] 重新生成 ${core_name} 主配置失败，请检查节点片段。${NC}"
+    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    rebuild_core_config "$core_name" >/dev/null 2>&1 || true
+    echo -e "${RED}[错误] 重新生成 ${core_name} 主配置失败，已自动回滚节点片段。${NC}"
     return 1
   fi
   if ! _reload_core_without_disconnect "$core_name"; then
-    echo -e "${RED}[错误] ${core_name} 热重载失败，为保护现有连接，未自动重启。${NC}"
+    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    rebuild_core_config "$core_name" >/dev/null 2>&1 || true
+    _reload_core_without_disconnect "$core_name" >/dev/null 2>&1 || true
+    echo -e "${RED}[错误] ${core_name} 热重载失败，已自动回滚节点片段并恢复旧配置。${NC}"
     return 1
   fi
+  rm -f "$backup_fragment"
   _node_meta_remove_port "$core_name" "$port" || true
   return 0
 }
@@ -2330,7 +2380,6 @@ output_node_result() {
     # 持久化记录
     sed -i "/端口:${PORT} /d" "$NODE_RECORD_FILE" 2>/dev/null
     echo "${CORE_NAME}-${LABEL} | 端口:${PORT} | ${LINK}" >> "$NODE_RECORD_FILE"
-    _node_meta_upsert "$CORE_NAME" "$PORT" "$LABEL" "$LINK" "$(_fragment_file_for_node "$CORE_NAME" "$PORT" "$PROTOCOL_NAME")" "$PROTOCOL_NAME" >/dev/null 2>&1 || true
 }
 
 install_reality_node() {
@@ -2410,8 +2459,7 @@ if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
 if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
 if [ "$cert_mode" == "1" ]; then
     read -r -s -p "> CF API Token: " CF_Token; echo ""; [ -z "$CF_Token" ] && continue
-    read -r -p "> CF Account ID: " CF_Account_ID; [ -z "$CF_Account_ID" ] && continue
-    export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"; break
+    export CF_Token="$CF_Token"; break
 else
     if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then
         echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
@@ -2433,7 +2481,7 @@ break
 done
 
 if ! confirm_action "开始部署 AnyTLS 并申请证书"; then pause_for_enter; return; fi
-acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_enter; return; }
+acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
     echo -e "\n${RED}[错误] 证书文件缺失: $CERT_DIR/${NC}"; ls -la "$CERT_DIR/" 2>/dev/null; pause_for_enter; return
 fi
@@ -2443,7 +2491,7 @@ if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需
 
 PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
 NEW_INBOUND='{"type":"anytls","listen":"::","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
-LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}&udp=1#AnyTLS-${PORT}"
+LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
@@ -2462,6 +2510,13 @@ acquire_cert() {
     local cert_mode="$2"
     local CF_Token="$3"
     local CF_Account_ID="$4"
+    local acme_domain_dir="/root/.acme.sh/${DOMAIN}_ecc"
+
+    cert_matches_domain() {
+        local cert_file="$1" domain="$2"
+        [ -f "$cert_file" ] || return 1
+        openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null | grep -Eq "DNS:(\*\.)?${domain//./\\.}([,[:space:]]|$)"
+    }
 
     # 按域名分离证书目录，杜绝不同域名复用同一证书
     CERT_DIR="/etc/vpsbox-cert/${DOMAIN}"
@@ -2475,44 +2530,35 @@ acquire_cert() {
     /root/.acme.sh/acme.sh --register-account -m dummy@vpsbox.com >/dev/null 2>&1
     echo -e "\n${CYAN}>>> 正在为 ${YELLOW}${DOMAIN}${CYAN} 申请 SSL 证书...${NC}\n${YELLOW}   DNS 验证可能需要 30-60 秒，请耐心等待${NC}"
 
-    local PORT_80_SERVICE=""
     local CERT_RES=1
 
     # 修复：不仅看 acme.sh list 还要检查物理文件 + 目标目录证书有效性
-    if /root/.acme.sh/acme.sh --list | grep -q "$DOMAIN"; then
-        if [ -f "/root/.acme.sh/${DOMAIN}_ecc/${DOMAIN}.cer" ] || [ -f "/root/.acme.sh/${DOMAIN}/${DOMAIN}.cer" ]; then
+    if [ -d "$acme_domain_dir" ] && [ -f "$acme_domain_dir/${DOMAIN}.cer" ]; then
             # 进一步验证：目标 CERT_DIR 中的证书是否存在且属于该域名
-            if [ -f "$CERT_DIR/fullchain.pem" ] && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -subject 2>/dev/null | grep -qi "$DOMAIN"; then
+            if cert_matches_domain "$CERT_DIR/fullchain.pem" "$DOMAIN"; then
                 echo -e "${GREEN}[成功] 检测到本地有效证书（域名匹配），复用机制触发！${NC}"
                 CERT_RES=0
             else
                 echo -e "${YELLOW}[提示] 检测到 acme.sh 证书记录但目标证书目录不匹配，将重新安装证书到 ${CERT_DIR}${NC}"
             fi
-        else
-            echo -e "${YELLOW}[警告] 检测到损坏的历史证书记录，正在深度清理并重新申请...${NC}"
-            /root/.acme.sh/acme.sh --remove -d "$DOMAIN" >/dev/null 2>&1
-            rm -rf "/root/.acme.sh/${DOMAIN}_ecc" "/root/.acme.sh/${DOMAIN}"
-        fi
+    elif [ -d "$acme_domain_dir" ]; then
+        echo -e "${YELLOW}[警告] 检测到损坏的历史证书记录，正在深度清理并重新申请...${NC}"
+        /root/.acme.sh/acme.sh --remove -d "$DOMAIN" >/dev/null 2>&1
+        rm -rf "/root/.acme.sh/${DOMAIN}_ecc" "/root/.acme.sh/${DOMAIN}"
     fi
 
     if [ "$CERT_RES" -ne 0 ]; then
         if [ "$cert_mode" == "1" ]; then
-            export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"
+            export CF_Token="$CF_Token"
             /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --dns dns_cf -k ec-256; CERT_RES=$?
         else
             if ss -tlnp | grep -q "\b:80\b"; then
-                PORT_80_SERVICE=$(ss -tlnp | grep "\b:80\b" | awk -F'"' '{print $2}' | grep -v "^$" | head -n 1)
-                [ -z "$PORT_80_SERVICE" ] && PORT_80_SERVICE=$(fuser 80/tcp 2>/dev/null | awk '{print $1}')
-                [ -z "$PORT_80_SERVICE" ] && PORT_80_SERVICE="未知程序"
-                echo -e "\n${YELLOW}[警告] 检测到 80 端口正被 [ ${PORT_80_SERVICE} ] 占用！${NC}"
-                read -r -p "> 是否仍要临时关闭强行申请？(y/n, 默认 n): " force_kill_80
-                if [[ ! "${force_kill_80// /}" =~ ^[yY]$ ]]; then echo -e "${CYAN}已取消操作。${NC}"; return 1; fi
-                _svc_stop "$PORT_80_SERVICE" > /dev/null 2>&1; fuser -k 80/tcp > /dev/null 2>&1; sleep 2
+                echo -e "\n${RED}[错误] 检测到 80 端口已被占用，独立模式不会再强行停服务或杀进程。${NC}"
+                echo -e "${YELLOW}请先手动释放 80 端口，或改用 Cloudflare API 模式申请证书。${NC}"
+                ss -tlnp | grep "\b:80\b" || true
+                return 1
             fi
             /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone -k ec-256; CERT_RES=$?
-            if [ -n "$PORT_80_SERVICE" ] && [ "$PORT_80_SERVICE" != "未知程序" ]; then
-                _svc_start "$PORT_80_SERVICE" >/dev/null 2>&1 || echo -e "${RED}[注意] ${PORT_80_SERVICE} 恢复失败。${NC}"
-            fi
         fi
     fi
 
@@ -2548,6 +2594,11 @@ acquire_cert() {
         rm -rf "$CERT_DIR"
         return 1
     fi
+    if ! cert_matches_domain "$CERT_DIR/fullchain.pem" "$DOMAIN"; then
+        echo -e "${RED}[错误] 证书 SAN 与目标域名不匹配: ${DOMAIN}${NC}"
+        rm -rf "$CERT_DIR"
+        return 1
+    fi
     chmod 755 "$CERT_DIR"; chmod 644 "$CERT_DIR"/*.pem; chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null
     return 0
 }
@@ -2574,12 +2625,11 @@ if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${R
 break
 done
 core_choice=$(select_core) || return
-echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token 和 Account ID？${NC}"
+echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token？${NC}"
 echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
 echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
 echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
 echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
-echo -e "  ${GREEN}5.${NC} Account ID: 返回仪表盘主页，右侧「⋮」→ 复制账户 ID"
 echo ""
 while true; do
 read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token
@@ -2587,15 +2637,11 @@ echo ""
 CF_Token="${CF_Token// /}"
 if [ "$CF_Token" == "0" ]; then return; fi
 if [ -z "$CF_Token" ]; then continue; fi
-read -r -p "> 请输入您的 Cloudflare Account ID (输入 0 取消): " CF_Account_ID
-CF_Account_ID="${CF_Account_ID// /}"
-if [ "$CF_Account_ID" == "0" ]; then return; fi
-if [ -z "$CF_Account_ID" ]; then continue; fi
-export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"; break
+export CF_Token="$CF_Token"; break
 done
 cert_mode=1
 if ! confirm_action "开始部署 WS+TLS 节点并申请证书"; then pause_for_enter; return; fi
-acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_enter; return; }
+acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
@@ -2607,7 +2653,7 @@ if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需
 NEW_INBOUND='{"type":"vless","listen":"::","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
-LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2,http/1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
+LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
     output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
@@ -2658,19 +2704,16 @@ cert_mode="${cert_mode// /}"
 if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
 if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
 if [ "$cert_mode" == "1" ]; then
-echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token 和 Account ID？${NC}"
+echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token？${NC}"
 echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
 echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
 echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
 echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
-echo -e "  ${GREEN}5.${NC} Account ID: 返回仪表盘主页，右侧「⋮」→ 复制账户 ID"
 echo ""
 read -r -s -p "> 请输入您的 Cloudflare API Token: " CF_Token
 echo ""
 if [ -z "$CF_Token" ]; then continue; fi
-read -r -p "> 请输入您的 Cloudflare Account ID: " CF_Account_ID
-if [ -z "$CF_Account_ID" ]; then continue; fi
-export CF_Token="$CF_Token"; export CF_Account_ID="$CF_Account_ID"; break
+export CF_Token="$CF_Token"; break
 elif [ "$cert_mode" == "2" ]; then
 if [ -n "$DOMAIN_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IP" ] && [ "$DOMAIN_IP" != "$SERVER_IPV6" ]; then 
 echo -e "\n${YELLOW}[警告] 域名解析 IP ($DOMAIN_IP) 与本机 IP 不符！${NC}"
@@ -2683,12 +2726,12 @@ break
 fi
 done
 if ! confirm_action "开始部署 Hysteria2 节点并申请证书"; then pause_for_enter; return; fi
-acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "$CF_Account_ID" || { pause_for_enter; return; }
+acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 HY2_PASS=$(openssl rand -hex 8)
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
 if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","email":"user@vpsbox"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"alpn":["h3"],"minVersion":"1.3","certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2,"auth":"'$HY2_PASS'","udpIdleTimeout":60}}}'
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria2","settings":{"password":"'$HY2_PASS'"},"streamSettings":{"network":"udp","security":"tls","tlsSettings":{"serverName":"'$DOMAIN'","alpn":["h3"],"minVersion":"1.3","certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]}}}'
 else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
