@@ -4,7 +4,7 @@
 # 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.7"
+VPSBOX_VERSION="v1.7.8"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3015,15 +3015,18 @@ print_center "[ IP 质量检测与流媒体解锁 ]" "$CYAN"
 install_dependencies
 echo -e "${CYAN}>>> 正在启动权威检测引擎...${NC}\n"
 local CHECK_TMP; CHECK_TMP=$(mktemp)
+local check_ret=2
 if curl -fsSL --connect-timeout 10 --max-time 60 https://Check.Place -o "$CHECK_TMP"; then
-    bash "$CHECK_TMP"
-    local check_ret=$?
-else
-    local check_ret=2
+    if grep -Eq '^#!/|(^|[[:space:]])(bash|sh)[[:space:]]' "$CHECK_TMP"; then
+        bash "$CHECK_TMP"
+        check_ret=$?
+    else
+        echo -e "${RED}[错误] 检测脚本内容校验失败，已拒绝执行可疑返回内容。${NC}"
+    fi
 fi
 rm -f "$CHECK_TMP"
 if [ $check_ret -ne 0 ] && [ $check_ret -ne 1 ]; then
-    echo -e "\n${RED}[错误] 网络不通或检测脚本无法下载，请检查服务器出墙连通性。${NC}"
+    echo -e "\n${RED}[错误] 网络不通、下载失败或检测脚本不可用，请检查服务器出墙连通性。${NC}"
 fi
 pause_for_enter
 }
@@ -4378,8 +4381,8 @@ esac
 done
 }
 
-# 仅管道模式重定向 stdin，终端模式（本地/vpsbox 命令/bash <()）保持原样
-if [ ! -t 0 ]; then
+# 仅在 stdin 非终端但存在可交互 tty 时切回 /dev/tty；否则保留当前 stdin，兼容 CI/管道回放场景
+if [ ! -t 0 ] && [ -r /dev/tty ] && [ -t 1 ]; then
     _vpsbox_main </dev/tty
 else
     _vpsbox_main
