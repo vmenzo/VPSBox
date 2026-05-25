@@ -1301,10 +1301,13 @@ _bbr_github_asset() {
 
 _bbr_remove_old_headers() {
   echo -e "  ${CYAN}>>> 清理旧 Headers...${NC}"
+  local current_kernel current_version
+  current_kernel=$(uname -r)
+  current_version=${current_kernel%%-*}
   if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
-    rpm -qa | grep 'kernel-headers' | grep -v "$(uname -r)" | xargs -r rpm -e --nodeps >/dev/null 2>&1
+    rpm -qa | grep -E '^kernel-headers' | grep -vF "$current_kernel" | grep -vF "$current_version" | xargs -r rpm -e --nodeps >/dev/null 2>&1
   elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
-    dpkg -l | grep 'linux-headers' | awk '{print $2}' | grep -v "$(uname -r)" | xargs -r apt-get purge -y >/dev/null 2>&1
+    dpkg-query -W -f='${Package}\n' 'linux-headers-*' 2>/dev/null | grep -vF "$current_kernel" | grep -vF "$current_version" | xargs -r apt-get purge -y >/dev/null 2>&1
     apt-get autoremove -y >/dev/null 2>&1
   fi
 }
@@ -1338,20 +1341,31 @@ _bbr_install_kernel() {
     [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "kernel-headers.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
     _bbr_safe_wget "$img_url" "kernel-image.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
     echo -e "  ${CYAN}>>> 执行 YUM 安装...${NC}"
-    if [[ -n "$head_url" ]]; then yum install -y kernel-image.rpm kernel-headers.rpm
-    else yum install -y kernel-image.rpm; fi
+    if [[ -n "$head_url" ]]; then
+      yum install -y kernel-image.rpm kernel-headers.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
+    else
+      yum install -y kernel-image.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
+    fi
   elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
     [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "linux-headers.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
     _bbr_safe_wget "$img_url" "linux-image.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
     echo -e "  ${CYAN}>>> 执行 DPKG 安装...${NC}"
-    dpkg -i linux-image.deb
-    [[ -n "$head_url" ]] && dpkg -i linux-headers.deb
+    dpkg -i linux-image.deb || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核镜像安装失败。${NC}"; return 1; }
+    [[ -n "$head_url" ]] && dpkg -i linux-headers.deb || [[ -z "$head_url" ]] || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核头文件安装失败。${NC}"; return 1; }
     echo -e "  ${CYAN}>>> 修复依赖...${NC}"
-    apt-get install -f -y
+    apt-get install -f -y || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核依赖修复失败。${NC}"; return 1; }
   fi
   cd /tmp && rm -rf "$wdir"
   _bbr_grub
   echo -e "\n  ${GREEN}[完成] ${desc} 内核包安装完毕！${NC}"
+}
+
+_bbr_apply_sysctl_file() {
+  local target_conf="$1"
+  if sysctl -p "$target_conf" >/dev/null 2>&1; then
+    return 0
+  fi
+  sysctl --system >/dev/null 2>&1
 }
 
 _bbr_apply_sysctl() {
@@ -1362,7 +1376,7 @@ _bbr_apply_sysctl() {
   [[ -f "$conf" ]] && sed -i '/net.ipv4.tcp_congestion_control/d; /net.core.default_qdisc/d' "$conf"
   echo "net.core.default_qdisc=$qdisc" >> "$conf"
   echo "net.ipv4.tcp_congestion_control=$cc" >> "$conf"
-  sysctl -p "$conf" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1
+  _bbr_apply_sysctl_file "$conf"
 }
 
 _bbr_clean_accel() {
@@ -1387,10 +1401,18 @@ _bbr_psabi_level() {
 _bbr_set_ecn() {
   local status="$1"
   local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
+  if [[ "$status" != "0" && "$status" != "1" ]]; then
+    echo -e "\n${RED}[错误] ECN 参数无效，仅支持 0 或 1。${NC}"
+    pause_for_enter
+    return 1
+  fi
   sed -i '/net.ipv4.tcp_ecn/d' "$conf" /etc/sysctl.conf 2>/dev/null
   echo "net.ipv4.tcp_ecn=$status" >> "$conf"
-  sysctl --system >/dev/null 2>&1
-  [[ "$status" == "1" ]] && echo -e "\n${GREEN}[成功] ECN 已开启！${NC}" || echo -e "\n${GREEN}[成功] ECN 已关闭！${NC}"
+  if _bbr_apply_sysctl_file "$conf"; then
+    [[ "$status" == "1" ]] && echo -e "\n${GREEN}[成功] ECN 已开启！${NC}" || echo -e "\n${GREEN}[成功] ECN 已关闭！${NC}"
+  else
+    [[ "$status" == "1" ]] && echo -e "\n${YELLOW}[警告] ECN 配置已写入，但应用失败，请手动检查。${NC}" || echo -e "\n${YELLOW}[警告] ECN 关闭配置已写入，但应用失败，请手动检查。${NC}"
+  fi
   pause_for_enter
 }
 
@@ -1478,8 +1500,13 @@ net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_max_syn_backlog = 1024000
 net.ipv4.tcp_synack_retries = 1
 EOF
-  sysctl --system >/dev/null 2>&1
-  echo -e "\n${GREEN}[完成] 防CC基础参数已写入！${NC}"; pause_for_enter
+  echo -e "${YELLOW}[提示] 将写入偏激进的防 CC TCP 参数，低内存或弱网络环境请谨慎使用。${NC}"
+  if _bbr_apply_sysctl_file "$conf"; then
+    echo -e "\n${GREEN}[完成] 防CC基础参数已写入并生效！${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] 防CC参数已写入，但应用失败，请手动检查。${NC}"
+  fi
+  pause_for_enter
 }
 
 _bbr_ipv6_off() {
@@ -1524,8 +1551,12 @@ _bbr_sysctl_merge() {
       echo -e "  ${RED}格式无效，跳过:${NC} $line"
     fi
   done
-  sysctl --system >/dev/null 2>&1
-  echo -e "\n${GREEN}[完成] 参数已合并！${NC}"; pause_for_enter
+  if _bbr_apply_sysctl_file "$conf"; then
+    echo -e "\n${GREEN}[完成] 参数已合并并生效！${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] 参数已写入，但应用失败，请手动检查。${NC}"
+  fi
+  pause_for_enter
 }
 
 _bbr_sysctl_edit() {
@@ -1534,8 +1565,12 @@ _bbr_sysctl_edit() {
   elif command -v vim &>/dev/null; then vim "$conf"
   elif command -v vi &>/dev/null; then echo -e "  ${YELLOW}使用 vi: i=编辑 Esc=退出 :wq=保存 :q!=放弃${NC}"; sleep 2; vi "$conf"
   else echo -e "\n${RED}[错误] 未找到编辑器 (nano/vim)。${NC}"; pause_for_enter; return; fi
-  sysctl -p "$conf" >/dev/null 2>&1
-  echo -e "\n${GREEN}[完成] 参数已应用！${NC}"; pause_for_enter
+  if _bbr_apply_sysctl_file "$conf"; then
+    echo -e "\n${GREEN}[完成] 参数已应用！${NC}"
+  else
+    echo -e "\n${YELLOW}[警告] 参数文件已保存，但应用失败，请手动检查。${NC}"
+  fi
+  pause_for_enter
 }
 
 _bbr_install_bbr_cloud() {
