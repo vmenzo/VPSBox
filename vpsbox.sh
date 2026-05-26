@@ -2298,16 +2298,11 @@ if [[ "$BBR_ARCH" == "aarch64" ]]; then
   echo -e "  ${YELLOW}[提示]${NC} 当前为 ARM 架构，内核已内置 BBR，更换内核可能不兼容"
 fi
 echo ""
-echo -e "  ─────────────── ${CYAN}TCP 调优${NC} ───────────────"
-echo -e "  ${GREEN} 7.${NC} 生成智能调优画像     ${GREEN} 8.${NC} 查看当前调优画像"
-echo -e "  ${GREEN} 9.${NC} 调优逻辑说明         ${GREEN}10.${NC} 开启 ECN"
-echo -e "  ${GREEN}11.${NC} 关闭 ECN             ${GREEN}12.${NC} 禁用 IPv6"
-echo -e "  ${GREEN}13.${NC} 开启 IPv6           ${GREEN}14.${NC} 合并内核参数"
-echo -e "  ${GREEN}15.${NC} 编辑内核参数"
+echo -e "  ─────────────── ${CYAN}加速卸载 / 内核管理${NC} ───────────────"
+echo -e "  ${GREEN} 7.${NC} 卸载全部加速配置"
 echo ""
 echo -e "  ─────────────── ${CYAN}内核管理${NC} ───────────────"
-echo -e "  ${GREEN}16.${NC} 查看已安装内核      ${GREEN}17.${NC} 删除指定内核"
-echo -e "  ${GREEN}18.${NC} 卸载全部加速配置"
+echo -e "  ${GREEN} 8.${NC} 查看已安装内核      ${GREEN} 9.${NC} 删除指定内核"
 echo ""
 echo -e "  ${GREEN} 0.${NC} 返回主菜单"
 echo ""
@@ -2320,18 +2315,9 @@ case $bbr_opt in
 3)  _bbr_install_xanmod main ;;         4)  _bbr_install_debian_cloud ;;
 5)  _bbr_install_official_stable ;;
 6)  _bbr_install_official_latest ;;
-7)  _bbr_collect_dynamic_inputs; _bbr_generate_dynamic_profile ;;
-8)  _bbr_show_generated_profile ;;
-9)  _bbr_show_dynamic_plan ;;
-10) _bbr_set_ecn 1 ;;
-11) _bbr_set_ecn 0 ;;
-12) _bbr_ipv6_off ;;
-13) _bbr_ipv6_on ;;
-14) _bbr_sysctl_merge ;;
-15) _bbr_sysctl_edit ;;
-16) _bbr_show_kernels ;;
-17) _bbr_delete_kernel ;;
-18) _bbr_remove_all ;;
+7)  _bbr_remove_all ;;
+8)  _bbr_show_kernels ;;
+9)  _bbr_delete_kernel ;;
 0)  break ;;
 *)  echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
 esac
@@ -2630,16 +2616,27 @@ while true; do
 clear_screen; print_divider
 print_center "[ TCP 调优 ]" "$CYAN"
 echo -e "  ${GREEN}1.${NC} 智能 TCP 调优"
-echo -e "  ${GREEN}2.${NC} 调优备份/还原"
+echo -e "  ${GREEN}2.${NC} 生成智能调优画像     ${GREEN}3.${NC} 查看当前调优画像"
+echo -e "  ${GREEN}4.${NC} 调优逻辑说明         ${GREEN}5.${NC} 开启 ECN"
+echo -e "  ${GREEN}6.${NC} 关闭 ECN             ${GREEN}7.${NC} 禁用 IPv6"
+echo -e "  ${GREEN}8.${NC} 开启 IPv6           ${GREEN}9.${NC} 合并内核参数"
+echo -e "  ${GREEN}10.${NC} 编辑内核参数       ${GREEN}11.${NC} 调优备份/还原"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请选择 [0-2]: " tuning_opt
-tuning_opt="${tuning_opt// /}"
-case $tuning_opt in
-1)
-run_tcp_tuning ;;
-2)
-manage_backup ;;
+read -r -p "> 请输入选择: " t_opt
+t_opt="${t_opt// /}"
+case "$t_opt" in
+1) run_tcp_tuning ;;
+2) _bbr_collect_dynamic_inputs; _bbr_generate_dynamic_profile ;;
+3) _bbr_show_generated_profile ;;
+4) _bbr_show_dynamic_plan ;;
+5) _bbr_set_ecn 1 ;;
+6) _bbr_set_ecn 0 ;;
+7) _bbr_ipv6_off ;;
+8) _bbr_ipv6_on ;;
+9) _bbr_sysctl_merge ;;
+10) _bbr_sysctl_edit ;;
+11) tcp_tuning_backup_menu ;;
 0) return ;;
 *) echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
 esac
