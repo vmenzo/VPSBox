@@ -1533,7 +1533,7 @@ _tcp_profile_collect_inputs() {
   eval "${prefix}_MEMORY_MB=$current_val"
 }
 
-manage_bbr() {
+manage_bbr() { :; }
 
 _bbr_collect_dynamic_inputs() {
   _tcp_profile_collect_inputs "BBR_TUNE" "bbr" "0"
@@ -2042,6 +2042,29 @@ _bbr_show_kernels() {
   pause_for_enter
 }
 
+_bbr_enable_native() {
+  local conf="/etc/sysctl.d/99-vpsbox-bbr.conf"
+  local qdisc="${1:-fq}"
+  local label="${2:-原生 BBR}"
+  local cc="${3:-bbr}"
+  mkdir -p /etc/sysctl.d
+  touch "$conf"
+
+  modprobe tcp_bbr >/dev/null 2>&1 || true
+
+  sed -i '/net\.core\.default_qdisc/d; /net\.ipv4\.tcp_congestion_control/d' "$conf" /etc/sysctl.conf 2>/dev/null
+  echo "net.core.default_qdisc = $qdisc" >> "$conf"
+  echo "net.ipv4.tcp_congestion_control = $cc" >> "$conf"
+
+  if _bbr_apply_sysctl_file "$conf"; then
+    echo -e "\n${GREEN}[成功] ${label} 已开启！${NC}"
+    echo -e "  当前状态: $(get_bbr_status)"
+  else
+    echo -e "\n${YELLOW}[警告] ${label} 配置已写入，但应用失败，请检查当前内核是否支持 $cc / $qdisc。${NC}"
+  fi
+  pause_for_enter
+}
+
 _bbr_delete_kernel() {
   clear_screen; print_divider
   print_center "[ 删除内核 ]" "$RED"
@@ -2280,6 +2303,7 @@ _bbr_install_xanmod() {
   echo -e "\n${GREEN}[完成] XanMod (${edition}) 内核安装完毕，重启后生效。${NC}"; pause_for_enter
 }
 
+manage_bbr() {
 _bbr_check_sys
 _bbr_check_cn
 
@@ -2304,10 +2328,13 @@ if [[ "$BBR_ARCH" == "aarch64" ]]; then
 fi
 echo ""
 echo -e "  ─────────────── ${CYAN}加速卸载 / 内核管理${NC} ───────────────"
-echo -e "  ${GREEN} 7.${NC} 卸载全部加速配置"
+echo -e "  ${GREEN} 7.${NC} 开启 BBR + FQ         ${GREEN} 8.${NC} 开启 BBR + CAKE"
+echo -e "  ${GREEN} 9.${NC} 开启原生 BBR        ${GREEN}10.${NC} 开启 BBRplus + FQ"
+echo -e "  ${GREEN}11.${NC} 开启 BBRplus + CAKE  ${GREEN}12.${NC} 恢复系统默认 (CUBIC)"
+echo -e "  ${GREEN}13.${NC} 卸载全部加速配置"
 echo ""
 echo -e "  ─────────────── ${CYAN}内核管理${NC} ───────────────"
-echo -e "  ${GREEN} 8.${NC} 查看已安装内核      ${GREEN} 9.${NC} 删除指定内核"
+echo -e "  ${GREEN}14.${NC} 查看已安装内核      ${GREEN}15.${NC} 删除指定内核"
 echo ""
 echo -e "  ${GREEN} 0.${NC} 返回主菜单"
 echo ""
@@ -2320,9 +2347,15 @@ case $bbr_opt in
 3)  _bbr_install_xanmod main ;;         4)  _bbr_install_debian_cloud ;;
 5)  _bbr_install_official_stable ;;
 6)  _bbr_install_official_latest ;;
-7)  _bbr_remove_all ;;
-8)  _bbr_show_kernels ;;
-9)  _bbr_delete_kernel ;;
+7)  _bbr_enable_native fq "BBR + FQ" bbr ;;
+8)  _bbr_enable_native cake "BBR + CAKE" bbr ;;
+9)  _bbr_enable_native fq "原生 BBR" bbr ;;
+10) _bbr_enable_native fq "BBRplus + FQ" bbrplus ;;
+11) _bbr_enable_native cake "BBRplus + CAKE" bbrplus ;;
+12) _bbr_enable_native fq_codel "系统默认 CUBIC" cubic ;;
+13) _bbr_remove_all ;;
+14) _bbr_show_kernels ;;
+15) _bbr_delete_kernel ;;
 0)  break ;;
 *)  echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
 esac
