@@ -55,6 +55,8 @@ _sync_shortcut_from_current() {
     [ "$shortcut_ver" = "$VPSBOX_VERSION" ] && return 0
     if [ -f "$0" ]; then
         install -m 755 "$0" "$SHORTCUT_PATH" 2>/dev/null || true
+    else
+        curl -fsSL --connect-timeout 5 --max-time 20 "$SCRIPT_URL" -o "$SHORTCUT_PATH" 2>/dev/null && chmod 755 "$SHORTCUT_PATH" 2>/dev/null || true
     fi
 }
 _sync_shortcut_from_current
