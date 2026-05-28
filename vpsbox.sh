@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.3 — 修复 Xray reload 后进程退出导致节点不通
+# 版本: v1.8.4 — 补全 Hysteria2 分享链接 ALPN 参数
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.3"
+VPSBOX_VERSION="v1.8.4"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3383,7 +3383,7 @@ if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需
 NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
-LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&insecure=0#H2"
+LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
     output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
