@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.10 — 修复 Xray Hysteria2 节点片段兼容性与热重载失败
+# 版本: v1.7.11 — Hysteria2 强制使用 Sing-box，避免 Xray 26 兼容性错误
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.10"
+VPSBOX_VERSION="v1.7.11"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3023,10 +3023,11 @@ if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then
 fi
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-X_BIN=$(command -v xray || echo "/usr/local/bin/xray"); KEYS=$("$X_BIN" x25519)
-PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
-NEW_INBOUND='{"port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"dest":"'$SNI_DOMAIN':443","serverNames":["'$SNI_DOMAIN'"],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "
+${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+echo -e "${RED}[错误] 当前 Hysteria2 节点仅支持 Sing-box 核心，Xray 26 的配置格式不兼容。${NC}"
+echo -e "${YELLOW}请返回选择 2) Sing-box 再部署 Hysteria2。${NC}"
+pause_for_enter; return
 else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
