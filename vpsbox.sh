@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.2 — 修复 Xray reload 与配置权限导致节点不通
+# 版本: v1.8.3 — 修复 Xray reload 后进程退出导致节点不通
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.2"
+VPSBOX_VERSION="v1.8.3"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -309,8 +309,24 @@ _svc_reload() {
     if command -v apk &>/dev/null; then
       timeout 10 service "$1" reload 2>/dev/null && { echo -e "${GREEN}  ✓ $1 热重载成功${NC}"; return 0; }
     else
-      timeout 10 /bin/systemctl reload "$1" 2>/dev/null && { echo -e "${GREEN}  ✓ $1 热重载成功${NC}"; return 0; }
-      [ -n "$OLD_PID" ] && timeout 5 /bin/kill -HUP "$OLD_PID" 2>/dev/null && { echo -e "${GREEN}  ✓ $1 热重载成功 (kill -HUP)${NC}"; return 0; }
+      if timeout 10 /bin/systemctl reload "$1" 2>/dev/null; then
+        sleep 1
+        if _svc_is_active "$1" 2>/dev/null; then
+          echo -e "${GREEN}  ✓ $1 热重载成功${NC}"
+          return 0
+        fi
+        echo -e "${YELLOW}[警告] $1 reload 返回成功但服务已退出，将尝试重新启动。${NC}"
+        _svc_start "$1" && return 0
+      fi
+      if [ -n "$OLD_PID" ] && timeout 5 /bin/kill -HUP "$OLD_PID" 2>/dev/null; then
+        sleep 1
+        if _svc_is_active "$1" 2>/dev/null; then
+          echo -e "${GREEN}  ✓ $1 热重载成功 (kill -HUP)${NC}"
+          return 0
+        fi
+        echo -e "${YELLOW}[警告] $1 HUP 后服务退出，将尝试重新启动。${NC}"
+        _svc_start "$1" && return 0
+      fi
     fi
     local NEW_PID; NEW_PID=$(_svc_main_pid "$1")
     if [ -n "$OLD_PID" ] && [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ]; then
