@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.0 — 四协议节点模板校验与 Xray/Sing-box 热重载兼容修复
+# 版本: v1.8.1 — 修复 Xray 临时配置缺少 .json 后缀导致格式识别失败
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.0"
+VPSBOX_VERSION="v1.8.1"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -589,7 +589,7 @@ rebuild_core_config() {
   config_file=$(_config_file_for_core "$core_name") || return 1
   runtime_dir=$(_runtime_dir_for_core "$core_name") || return 1
   mkdir -p "$runtime_dir"
-  tmp_file=$(mktemp) || return 1
+  tmp_file=$(mktemp --suffix=.json) || return 1
   if [ "$core_name" == "Xray" ]; then
     _emit_xray_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
     if ! jq -e '.inbounds | all(type=="object" and has("protocol"))' "$tmp_file" >/dev/null 2>&1; then
