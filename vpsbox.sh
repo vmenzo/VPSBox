@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.6 — 修复 Xray Hysteria2 clients.auth 可用配置
+# 版本: v1.8.7 — Xray 改为校验后平滑重启，Sing-box 保持热重载
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.6"
+VPSBOX_VERSION="v1.8.7"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -584,7 +584,16 @@ _reload_core_without_disconnect() {
   local core_name="$1"
   local service_name; service_name=$(_service_name_for_core "$core_name") || return 1
   if [ "$core_name" == "Xray" ]; then
-    _ensure_xray_service_reload_support
+    if _svc_is_active "$service_name" 2>/dev/null; then
+      echo -e "${YELLOW}[提示] Xray 当前以 systemd 单进程方式运行，HUP 会导致进程退出。${NC}"
+      echo -e "${YELLOW}      本次将改为校验后的平滑重启应用新配置。${NC}"
+      _svc_restart "$service_name" && return 0
+      echo -e "${RED}[错误] ${service_name} 重启失败，新配置未生效。${NC}"
+      return 1
+    fi
+    echo -e "${YELLOW}[提示] ${service_name} 当前未运行，正在首次启动...${NC}"
+    _svc_start "$service_name" && _svc_enable "$service_name" >/dev/null 2>&1
+    return $?
   elif [ "$core_name" == "Sing-box" ]; then
     _ensure_singbox_service_reload_support
   fi
