@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.3 — 元数据回滚修复、README 重写与全局检查加固
+# 版本: v1.7.10 — 修复 Xray Hysteria2 节点片段兼容性与热重载失败
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.9"
+VPSBOX_VERSION="v1.7.10"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3341,7 +3341,7 @@ HY2_PASS=$(openssl rand -hex 8)
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
 if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
-NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria2","settings":{"password":"'$HY2_PASS'"},"streamSettings":{"network":"udp","security":"tls","tlsSettings":{"serverName":"'$DOMAIN'","alpn":["h3"],"minVersion":"1.3","certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]}}}'
+NEW_INBOUND='{"type":"hysteria2","tag":"h2-in","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 else
 CORE_NAME="Sing-box"
 if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
