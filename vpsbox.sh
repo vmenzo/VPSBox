@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.1 — 修复 Xray 临时配置缺少 .json 后缀导致格式识别失败
+# 版本: v1.8.2 — 修复 Xray reload 与配置权限导致节点不通
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.1"
+VPSBOX_VERSION="v1.8.2"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -447,7 +447,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ExecStart=${bin_path} run -config ${XRAY_CONFIG_FILE}
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=500
@@ -459,7 +459,7 @@ EOF
     _svc_daemon_reload >/dev/null 2>&1 || true
   elif ! grep -q '^ExecReload=' "$XRAY_SERVICE_FILE"; then
     local tmp_service; tmp_service=$(mktemp) || return 0
-    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP \\$MAINPID"}' "$XRAY_SERVICE_FILE" > "$tmp_service"; then
+    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP $MAINPID"}' "$XRAY_SERVICE_FILE" > "$tmp_service"; then
       mv "$tmp_service" "$XRAY_SERVICE_FILE"
       _svc_daemon_reload >/dev/null 2>&1 || true
     else
@@ -482,7 +482,7 @@ After=network.target nss-lookup.target
 [Service]
 User=root
 ExecStart=${bin_path} run -c ${SINGBOX_CONFIG_FILE}
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=500
@@ -494,7 +494,7 @@ EOF
     _svc_daemon_reload >/dev/null 2>&1 || true
   elif ! grep -q '^ExecReload=' "$SINGBOX_SERVICE_FILE"; then
     local tmp_service; tmp_service=$(mktemp) || return 0
-    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP \\$MAINPID"}' "$SINGBOX_SERVICE_FILE" > "$tmp_service"; then
+    if awk '1; /^ExecStart=/{print "ExecReload=/bin/kill -HUP $MAINPID"}' "$SINGBOX_SERVICE_FILE" > "$tmp_service"; then
       mv "$tmp_service" "$SINGBOX_SERVICE_FILE"
       _svc_daemon_reload >/dev/null 2>&1 || true
     else
@@ -605,6 +605,10 @@ rebuild_core_config() {
     return 1
   fi
   mv "$tmp_file" "$config_file"
+  chmod 644 "$config_file" 2>/dev/null || true
+  if [ "$core_name" = "Xray" ]; then
+    find "$(dirname "$config_file")" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -exec chmod 644 {} \; 2>/dev/null || true
+  fi
   return 0
 }
 
