@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.7 — Xray 改为校验后平滑重启，Sing-box 保持热重载
+# 版本: v1.8.8 — 新增/删除节点改为 30 秒延迟重启，避免部署中途断网
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.7"
+VPSBOX_VERSION="v1.8.8"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -315,8 +315,8 @@ _svc_reload() {
           echo -e "${GREEN}  ✓ $1 热重载成功${NC}"
           return 0
         fi
-        echo -e "${YELLOW}[警告] $1 reload 返回成功但服务已退出，将尝试重新启动。${NC}"
-        _svc_start "$1" && return 0
+        echo -e "${YELLOW}[警告] $1 reload 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
+        return 1
       fi
       if [ -n "$OLD_PID" ] && timeout 5 /bin/kill -HUP "$OLD_PID" 2>/dev/null; then
         sleep 1
@@ -324,13 +324,13 @@ _svc_reload() {
           echo -e "${GREEN}  ✓ $1 热重载成功 (kill -HUP)${NC}"
           return 0
         fi
-        echo -e "${YELLOW}[警告] $1 HUP 后服务退出，将尝试重新启动。${NC}"
-        _svc_start "$1" && return 0
+        echo -e "${YELLOW}[警告] $1 HUP 后服务已退出；为避免部署中途断网，本次不会自动拉起。${NC}"
+        return 1
       fi
     fi
     local NEW_PID; NEW_PID=$(_svc_main_pid "$1")
     if [ -n "$OLD_PID" ] && [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ]; then
-      echo -e "${RED}[错误] $1 意外重启 (PID $OLD_PID → $NEW_PID)，连接已中断！${NC}"
+      echo -e "${RED}[错误] $1 意外重启 (PID $OLD_PID → $NEW_PID)，连接可能已中断！${NC}"
     else
       echo -e "${YELLOW}[警告] $1 热重载失败，新配置未生效。请稍后手动: systemctl restart $1${NC}"
     fi
@@ -339,6 +339,18 @@ _svc_reload() {
     echo -e "${YELLOW}  $1 未运行，正在启动...${NC}"
     _svc_start "$1"
   fi
+}
+
+_svc_delayed_restart() {
+  local service_name="$1" delay="${2:-30}"
+  if command -v apk &>/dev/null; then
+    ( sleep "$delay"; service "$service_name" restart >/dev/null 2>&1 ) >/dev/null 2>&1 &
+    return 0
+  fi
+  if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run --on-active="${delay}s" --unit="vpsbox-delayed-${service_name}-restart" /bin/systemctl restart "$service_name" >/dev/null 2>&1 && return 0
+  fi
+  ( sleep "$delay"; /bin/systemctl restart "$service_name" >/dev/null 2>&1 ) >/dev/null 2>&1 &
 }
 _svc_daemon_reload() {
   if command -v apk &>/dev/null; then return 0
@@ -583,25 +595,11 @@ _validate_generated_config() {
 _reload_core_without_disconnect() {
   local core_name="$1"
   local service_name; service_name=$(_service_name_for_core "$core_name") || return 1
-  if [ "$core_name" == "Xray" ]; then
-    if _svc_is_active "$service_name" 2>/dev/null; then
-      echo -e "${YELLOW}[提示] Xray 当前以 systemd 单进程方式运行，HUP 会导致进程退出。${NC}"
-      echo -e "${YELLOW}      本次将改为校验后的平滑重启应用新配置。${NC}"
-      _svc_restart "$service_name" && return 0
-      echo -e "${RED}[错误] ${service_name} 重启失败，新配置未生效。${NC}"
-      return 1
-    fi
-    echo -e "${YELLOW}[提示] ${service_name} 当前未运行，正在首次启动...${NC}"
-    _svc_start "$service_name" && _svc_enable "$service_name" >/dev/null 2>&1
-    return $?
-  elif [ "$core_name" == "Sing-box" ]; then
-    _ensure_singbox_service_reload_support
-  fi
   if _svc_is_active "$service_name" 2>/dev/null; then
-    if _svc_reload "$service_name"; then
-      return 0
-    fi
-    echo -e "${RED}[错误] ${service_name} 热重载失败。为保护现有连接，本次不会自动重启服务。${NC}"
+    echo -e "${YELLOW}[提示] ${service_name} 正在运行；为避免部署中途断网，本次不执行热重载/HUP。${NC}"
+    echo -e "${YELLOW}      已安排 30 秒后延迟重启应用新配置，新节点约 30 秒后生效。脚本会先完成记录写入。${NC}"
+    _svc_delayed_restart "$service_name" 30 && return 0
+    echo -e "${RED}[错误] 无法安排 ${service_name} 延迟重启，新配置暂未生效。${NC}"
     return 1
   fi
   echo -e "${YELLOW}[提示] ${service_name} 当前未运行，正在首次启动...${NC}"
@@ -715,7 +713,7 @@ remove_node_runtime() {
     mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     _reload_core_without_disconnect "$core_name" >/dev/null 2>&1 || true
-    echo -e "${RED}[错误] ${core_name} 热重载失败，已自动回滚节点片段并恢复旧配置。${NC}"
+    echo -e "${RED}[错误] ${core_name} 延迟重启安排失败，已自动回滚节点片段并恢复旧配置。${NC}"
     return 1
   fi
   rm -f "$backup_fragment"
@@ -2978,7 +2976,7 @@ break
 done
 if ! confirm_action "永久删除端口为 $del_port 的节点" "n"; then pause_for_enter; return; fi
 if remove_node_runtime "$core_for_port" "$del_port"; then
-echo -e "${GREEN}[成功] 已成功移除 ${core_for_port} 中占用端口 $del_port 的节点配置，并完成无感热重载！${NC}"
+echo -e "${GREEN}[成功] 已成功移除 ${core_for_port} 中占用端口 $del_port 的节点配置，新配置约 30 秒后生效！${NC}"
 else
 echo -e "${RED}[错误] ${core_for_port} 节点删除失败，原有连接未被强制重启。${NC}"
 fi
@@ -2988,12 +2986,12 @@ pause_for_enter
 
 append_inbound() {
 local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; local PROTOCOL_NAME=$6; local LINK=$7
-echo -e "${YELLOW}[系统] 正在写入独立节点片段并热重载 ${CORE_NAME}...${NC}"
+echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
-    echo -e "${GREEN}  ✓ 节点片段写入成功，核心已无感热重载${NC}"
+    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC}"
     return 0
 fi
-echo -e "${RED}[错误] 节点片段写入或热重载失败，已取消本次变更。${NC}"
+echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
 return 1
 }
 
@@ -3083,7 +3081,7 @@ LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
     output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME" "vless-reality"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，并执行无感热重载。旧连接不会因新增节点被整体重启。${NC}"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。旧连接不会因新增节点在部署中途被重启。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合要求，未修改任何文件。${NC}"
 fi
@@ -3150,7 +3148,7 @@ LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，并执行无感热重载。${NC}"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -3311,7 +3309,7 @@ LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DO
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
     output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，并执行无感热重载。${NC}"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -3398,7 +3396,7 @@ LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insec
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
     output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，并执行无感热重载。${NC}"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
