@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.11 — Hysteria2 强制使用 Sing-box，避免 Xray 26 兼容性错误
+# 版本: v1.7.12 — Hysteria2 强制使用 Sing-box，避免 Xray 26 兼容性错误
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.11"
+VPSBOX_VERSION="v1.7.12"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -610,11 +610,19 @@ write_node_fragment() {
   mkdir -p "$node_dir"
   tmp_file=$(mktemp) || return 1
   final_file=$(_fragment_file_for_node "$core_name" "$port" "$protocol") || { rm -f "$tmp_file"; return 1; }
-  printf '%s\n' "$node_json" > "$tmp_file"
+  printf '%s
+' "$node_json" > "$tmp_file"
   if ! jq empty "$tmp_file" >/dev/null 2>&1; then
     rm -f "$tmp_file"
     echo -e "${RED}[错误] 节点片段 JSON 无效，已取消写入。${NC}"
     return 1
+  fi
+  if [ "$core_name" = "Xray" ]; then
+    if ! jq -e 'has("protocol") or has("type")' "$tmp_file" >/dev/null 2>&1; then
+      rm -f "$tmp_file"
+      echo -e "${RED}[错误] Xray 节点片段缺少协议字段，已取消写入。${NC}"
+      return 1
+    fi
   fi
   mv "$tmp_file" "$final_file"
   echo "$final_file"
