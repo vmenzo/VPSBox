@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.7.12 — Hysteria2 强制使用 Sing-box，避免 Xray 26 兼容性错误
+# 版本: v1.7.13 — Hysteria2 强制使用 Sing-box，避免 Xray 26 兼容性错误
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.7.12"
+VPSBOX_VERSION="v1.7.13"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -592,6 +592,11 @@ rebuild_core_config() {
   tmp_file=$(mktemp) || return 1
   if [ "$core_name" == "Xray" ]; then
     _emit_xray_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    if ! jq -e '.inbounds | all(type=="object" and has("protocol"))' "$tmp_file" >/dev/null 2>&1; then
+      echo -e "${RED}[校验错误] Xray 节点片段包含不兼容对象，已拦截。${NC}"
+      rm -f "$tmp_file"
+      return 1
+    fi
   else
     _emit_singbox_merged_config "$tmp_file" || { rm -f "$tmp_file"; return 1; }
   fi
