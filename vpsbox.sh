@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.8 — 新增/删除节点改为 30 秒延迟重启，避免部署中途断网
+# 版本: v1.8.9 — 增加快捷中转、HY2 端口跳跃、Shadowsocks 节点
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.8"
+VPSBOX_VERSION="v1.8.9"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -38,9 +38,11 @@ XRAY_META_FILE="${NODE_RUNTIME_STATE_DIR}/xray_nodes.json"
 SINGBOX_META_FILE="${NODE_RUNTIME_STATE_DIR}/singbox_nodes.json"
 XRAY_SERVICE_FILE="/etc/systemd/system/xray.service"
 SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
+PORT_FORWARD_STATE_DIR="/etc/vpsbox_port_forward"
+PORT_FORWARD_SERVICE_DIR="/etc/systemd/system"
 
 mkdir -p "$BACKUP_DIR"
-mkdir -p "$NODE_RUNTIME_STATE_DIR"
+mkdir -p "$NODE_RUNTIME_STATE_DIR" "$PORT_FORWARD_STATE_DIR"
 if [ "$EUID" -ne 0 ]; then
 echo -e "\n${RED}[错误] 权限不足！请使用 root 用户运行。${NC}\n"
 exit 1
@@ -355,6 +357,27 @@ _svc_delayed_restart() {
 _svc_daemon_reload() {
   if command -v apk &>/dev/null; then return 0
   else /bin/systemctl daemon-reload 2>/dev/null; fi
+}
+
+_valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+_port_is_listening() {
+  local port="$1" proto="${2:-any}"
+  case "$proto" in
+    tcp) ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "(^|:|\\])${port}$" ;;
+    udp) ss -uln 2>/dev/null | awk '{print $4}' | grep -qE "(^|:|\\])${port}$" ;;
+    *) ss -tuln 2>/dev/null | awk '{print $4}' | grep -qE "(^|:|\\])${port}$" ;;
+  esac
+}
+
+_ufw_allow_if_active() {
+  local port="$1" proto="$2"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+  fi
 }
 
 _json_escape() {
@@ -3325,6 +3348,99 @@ echo ""
 pause_for_enter
 }
 
+install_ss_node() {
+clear_screen; print_divider
+print_center "[ 部署 Shadowsocks 节点 ]" "$CYAN"
+_ensure_ip
+
+echo -e "${YELLOW}>>> 小白科普：Shadowsocks 是经典轻量代理协议，兼容性好。这里默认使用 aes-256-gcm，支持 TCP+UDP。${NC}\n"
+
+while true; do
+read -r -p "> 监听端口 (默认 40000, 0 取消): " SS_PORT
+SS_PORT="${SS_PORT// /}"
+if [ "$SS_PORT" == "0" ]; then return; fi; [ -z "$SS_PORT" ] && SS_PORT=40000
+if ! _valid_port "$SS_PORT"; then echo -e "${RED}[错误] 端口号必须是 1-65535。${NC}"; continue; fi
+if _port_is_listening "$SS_PORT"; then echo -e "${RED}[错误] 端口 $SS_PORT 已被占用！${NC}"; continue; fi
+break
+done
+
+core_choice=$(select_core) || return
+
+echo -e "\n${CYAN}>>> 加密方式选择${NC}"
+echo -e "  ${GREEN}1.${NC} aes-256-gcm ${CYAN}[推荐/兼容好]${NC}"
+echo -e "  ${GREEN}2.${NC} chacha20-ietf-poly1305"
+echo -e "  ${GREEN}3.${NC} 2022-blake3-aes-128-gcm"
+echo -e "  ${GREEN}4.${NC} 2022-blake3-aes-256-gcm"
+while true; do
+read -r -p "> 请选择 [1-4, 默认 1, 0 取消]: " method_choice
+method_choice="${method_choice// /}"
+if [ "$method_choice" == "0" ]; then return; fi; [ -z "$method_choice" ] && method_choice=1
+case "$method_choice" in
+  1) SS_METHOD="aes-256-gcm"; SS_PASS=$(openssl rand -base64 18 | tr -d '+/=' | head -c 20); break ;;
+  2) SS_METHOD="chacha20-ietf-poly1305"; SS_PASS=$(openssl rand -base64 18 | tr -d '+/=' | head -c 20); break ;;
+  3) SS_METHOD="2022-blake3-aes-128-gcm"; SS_PASS=$(openssl rand -base64 16); break ;;
+  4) SS_METHOD="2022-blake3-aes-256-gcm"; SS_PASS=$(openssl rand -base64 32); break ;;
+  *) echo -e "${RED}[错误] 输入无效。${NC}" ;;
+esac
+done
+
+if ! confirm_action "开始部署 Shadowsocks 节点"; then pause_for_enter; return; fi
+install_dependencies
+LINK_IP="$SERVER_IP"
+if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then LINK_IP="[${SERVER_IPV6}]"; fi
+if [ "$core_choice" == "1" ]; then
+CORE_NAME="Xray"
+if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$SS_PORT',"protocol":"shadowsocks","settings":{"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'","level":0,"email":"vpsbox@ss"}}'
+else
+CORE_NAME="Sing-box"
+if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash https://sing-box.app/install.sh > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'"}'
+fi
+
+SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
+LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
+
+if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
+    _ufw_allow_if_active "$SS_PORT" tcp
+    _ufw_allow_if_active "$SS_PORT" udp
+    output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
+    echo -e "\n${GREEN}>>> Shadowsocks 节点已生成，新节点约 30 秒后生效。${NC}"
+    echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
+else
+    echo -e "\n${RED}[错误] 配置校验失败。${NC}"
+fi
+pause_for_enter
+}
+
+_setup_hy2_port_hopping() {
+  local target_port="$1" range="$2" start end
+  if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 1; fi
+  start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+  _valid_port "$start" && _valid_port "$end" && [ "$start" -le "$end" ] || return 1
+
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
+      iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+    iptables -t nat -C OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
+      iptables -t nat -A OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+  fi
+
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  fi
+
+  _ufw_allow_if_active "$target_port" udp
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+    ufw allow "${start}:${end}/udp" >/dev/null 2>&1 || true
+    ufw reload >/dev/null 2>&1 || true
+  fi
+  echo -e "${GREEN}  ✓ HY2 UDP 端口跳跃已配置: ${start}-${end} -> ${target_port}${NC}"
+  echo -e "${YELLOW}  提示：若系统未安装持久化组件，重启后可能需要重新配置端口跳跃。${NC}"
+}
+
 install_hy2_node() {
 clear_screen; print_divider
 print_center "[ 部署 Hysteria2 节点 ]" "$CYAN"
@@ -3343,10 +3459,33 @@ while true; do
 read -r -p "> 监听端口 (默认 8443, 0 取消): " HY2_PORT
 HY2_PORT="${HY2_PORT// /}"
 if [ "$HY2_PORT" == "0" ]; then return; fi; [ -z "$HY2_PORT" ] && HY2_PORT=8443
-if ! [[ "$HY2_PORT" =~ ^[0-9]+$ ]] || [ "$HY2_PORT" -lt 1 ] || [ "$HY2_PORT" -gt 65535 ]; then continue; fi
-if ss -tulpn | grep -qE ":${HY2_PORT}[[:space:]]|:${HY2_PORT}$"; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
+if ! _valid_port "$HY2_PORT"; then continue; fi
+if _port_is_listening "$HY2_PORT"; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
 break
 done
+
+echo -e "\n${CYAN}>>> HY2 端口跳跃${NC}"
+echo -e "  ${GREEN}1.${NC} 不启用，只使用主端口 ${HY2_PORT}"
+echo -e "  ${GREEN}2.${NC} 启用 UDP 端口跳跃（额外端口转发到主端口）"
+HY2_HOP_ENABLED=0; HY2_HOP_RANGE=""
+read -r -p "> 请选择 [1-2, 默认 1, 0 取消]: " hop_choice
+hop_choice="${hop_choice// /}"
+[ "$hop_choice" = "0" ] && return
+if [ "$hop_choice" = "2" ]; then
+  while true; do
+    read -r -p "> 跳跃端口范围，例如 20000-20100 (0 取消): " HY2_HOP_RANGE
+    HY2_HOP_RANGE="${HY2_HOP_RANGE// /}"
+    [ "$HY2_HOP_RANGE" = "0" ] && return
+    if [[ "$HY2_HOP_RANGE" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+      HOP_START="${BASH_REMATCH[1]}"; HOP_END="${BASH_REMATCH[2]}"
+      if _valid_port "$HOP_START" && _valid_port "$HOP_END" && [ "$HOP_START" -le "$HOP_END" ]; then
+        HY2_HOP_ENABLED=1
+        break
+      fi
+    fi
+    echo -e "${RED}[错误] 范围格式无效，请输入类似 20000-20100。${NC}"
+  done
+fi
 core_choice=$(select_core) || return
 echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
 echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
@@ -3395,8 +3534,15 @@ fi
 LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
+    _ufw_allow_if_active "$HY2_PORT" udp
+    if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
+        _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"
+    fi
     output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
+    if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
+        echo -e "${YELLOW}>>> 端口跳跃范围: ${HY2_HOP_RANGE}/udp，请在云厂商安全组放行该 UDP 范围。${NC}"
+    fi
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -3423,6 +3569,263 @@ fi
 pause_for_enter
 }
 
+_forward_state_file() {
+  echo "${PORT_FORWARD_STATE_DIR}/${1}-${2}.conf"
+}
+
+_resolve_target_ipv4() {
+  local target="$1" ip=""
+  if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "$target"; return 0
+  fi
+  ip=$(getent ahostsv4 "$target" 2>/dev/null | awk '{print $1; exit}')
+  [ -n "$ip" ] && { echo "$ip"; return 0; }
+  return 1
+}
+
+_enable_ipv4_forwarding() {
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  mkdir -p /etc/sysctl.d
+  if [ -w /etc/sysctl.d ]; then
+    cat > /etc/sysctl.d/99-vpsbox-forward.conf <<EOFIPF
+net.ipv4.ip_forward=1
+EOFIPF
+  fi
+}
+
+_iptables_rule() {
+  local action="$1" listen_port="$2" proto="$3" target_ip="$4" target_port="$5"
+  iptables -t nat "$action" PREROUTING -p "$proto" --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null || return 1
+  iptables -t nat "$action" OUTPUT -p "$proto" -o lo --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null || true
+  iptables -t nat "$action" POSTROUTING -p "$proto" -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+}
+
+_apply_iptables_forward() {
+  local listen_port="$1" proto="$2" target_ip="$3" target_port="$4"
+  command -v iptables >/dev/null 2>&1 || return 1
+  _enable_ipv4_forwarding
+  _iptables_rule -C "$listen_port" "$proto" "$target_ip" "$target_port" || \
+    _iptables_rule -A "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  fi
+}
+
+_remove_iptables_forward() {
+  local listen_port="$1" proto="$2" target_ip="$3" target_port="$4"
+  command -v iptables >/dev/null 2>&1 || return 0
+  while _iptables_rule -C "$listen_port" "$proto" "$target_ip" "$target_port"; do
+    _iptables_rule -D "$listen_port" "$proto" "$target_ip" "$target_port" || break
+  done
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  fi
+}
+
+_forward_unit_name() {
+  local listen_port="$1" proto="$2"
+  echo "vpsbox-forward-${listen_port}-${proto}.service"
+}
+
+_forward_unit_file() {
+  echo "${PORT_FORWARD_SERVICE_DIR}/$(_forward_unit_name "$1" "$2")"
+}
+
+_write_socat_forward() {
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" unit_file unit_name exec_cmd
+  unit_name=$(_forward_unit_name "$listen_port" "$proto")
+  unit_file=$(_forward_unit_file "$listen_port" "$proto")
+  mkdir -p "$PORT_FORWARD_STATE_DIR"
+  if [ "$proto" = "tcp" ]; then
+    exec_cmd="/usr/bin/socat TCP-LISTEN:${listen_port},fork,reuseaddr TCP:${target_host}:${target_port}"
+  else
+    exec_cmd="/usr/bin/socat UDP-LISTEN:${listen_port},fork,reuseaddr UDP:${target_host}:${target_port}"
+  fi
+  cat > "$unit_file" <<EOFUNIT
+[Unit]
+Description=VPSBox socat forward ${proto} ${listen_port} to ${target_host}:${target_port}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${exec_cmd}
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOFUNIT
+  _svc_daemon_reload >/dev/null 2>&1 || true
+  systemctl enable --now "$unit_name" >/dev/null 2>&1
+}
+
+_write_forward_state() {
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" mode="$5" target_ip="${6:-}" unit="${7:-}"
+  cat > "$(_forward_state_file "$listen_port" "$proto")" <<EOFSTATE
+LISTEN_PORT=${listen_port}
+PROTO=${proto}
+TARGET_HOST=${target_host}
+TARGET_PORT=${target_port}
+MODE=${mode}
+TARGET_IP=${target_ip}
+UNIT=${unit}
+EOFSTATE
+}
+
+_apply_port_forward() {
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" target_ip=""
+  mkdir -p "$PORT_FORWARD_STATE_DIR"
+  if target_ip=$(_resolve_target_ipv4 "$target_host"); then
+    if _apply_iptables_forward "$listen_port" "$proto" "$target_ip" "$target_port"; then
+      _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "iptables" "$target_ip" ""
+      return 0
+    fi
+  fi
+  command -v socat >/dev/null 2>&1 || return 1
+  if _write_socat_forward "$listen_port" "$proto" "$target_host" "$target_port"; then
+    _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "socat" "" "$(_forward_unit_name "$listen_port" "$proto")"
+    return 0
+  fi
+  return 1
+}
+
+_list_port_forwards() {
+  shopt -s nullglob
+  local files=("${PORT_FORWARD_STATE_DIR}"/*.conf)
+  shopt -u nullglob
+  if [ ${#files[@]} -eq 0 ]; then
+    echo -e "${YELLOW}暂无 VPSBox 管理的端口转发。${NC}"
+    return 1
+  fi
+  local i=1 f
+  for f in "${files[@]}"; do
+    unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+    . "$f" 2>/dev/null || true
+    echo -e "  ${GREEN}${i}.${NC} ${PROTO:-?} :${LISTEN_PORT:-?} -> ${TARGET_HOST:-?}:${TARGET_PORT:-?}  ${CYAN}${MODE:-?}${NC}"
+    i=$((i+1))
+  done
+}
+
+add_port_forward() {
+clear_screen; print_divider
+print_center "[ 添加端口转发 / 快捷中转 ]" "$CYAN"
+echo -e "${YELLOW}>>> 优先使用 iptables 内核转发（性能更好），无法解析/应用时自动回退 socat + systemd。${NC}"
+echo -e "${YELLOW}>>> 请确认目标地址可信，避免把服务器变成开放转发入口。${NC}\n"
+
+while true; do
+read -r -p "> 本机监听端口 (0 取消): " listen_port
+listen_port="${listen_port// /}"
+[ "$listen_port" = "0" ] && return
+if ! _valid_port "$listen_port"; then echo -e "${RED}[错误] 端口号必须是 1-65535。${NC}"; continue; fi
+if _port_is_listening "$listen_port"; then echo -e "${RED}[错误] 本机端口 $listen_port 已被占用。${NC}"; continue; fi
+break
+done
+
+read -r -p "> 目标地址/IP (0 取消): " target_host
+[ "$target_host" = "0" ] && return
+if [ -z "$target_host" ]; then echo -e "${RED}[错误] 目标地址不能为空。${NC}"; pause_for_enter; return; fi
+if [[ ! "$target_host" =~ ^[A-Za-z0-9._:-]+$ ]]; then echo -e "${RED}[错误] 目标地址仅允许域名/IP 字符。${NC}"; pause_for_enter; return; fi
+
+while true; do
+read -r -p "> 目标端口 (0 取消): " target_port
+target_port="${target_port// /}"
+[ "$target_port" = "0" ] && return
+_valid_port "$target_port" && break
+echo -e "${RED}[错误] 目标端口必须是 1-65535。${NC}"
+done
+
+echo -e "\n${CYAN}>>> 转发协议${NC}"
+echo -e "  ${GREEN}1.${NC} TCP"
+echo -e "  ${GREEN}2.${NC} UDP"
+echo -e "  ${GREEN}3.${NC} TCP + UDP"
+while true; do
+read -r -p "> 请选择 [1-3, 默认 1, 0 取消]: " proto_choice
+proto_choice="${proto_choice// /}"
+[ "$proto_choice" = "0" ] && return
+[ -z "$proto_choice" ] && proto_choice=1
+case "$proto_choice" in
+  1) protos="tcp"; break ;;
+  2) protos="udp"; break ;;
+  3) protos="tcp udp"; break ;;
+  *) echo -e "${RED}[错误] 输入无效。${NC}" ;;
+esac
+done
+
+if ! confirm_action "添加快捷中转 ${listen_port} -> ${target_host}:${target_port}"; then pause_for_enter; return; fi
+install_dependencies
+local ok=1 p before_mode state_file
+for p in $protos; do
+  if _apply_port_forward "$listen_port" "$p" "$target_host" "$target_port"; then
+    _ufw_allow_if_active "$listen_port" "$p"
+    state_file=$(_forward_state_file "$listen_port" "$p")
+    unset MODE
+    . "$state_file" 2>/dev/null || true
+    echo -e "${GREEN}  ✓ ${p} 转发已启动: ${listen_port} -> ${target_host}:${target_port} (${MODE:-unknown})${NC}"
+  else
+    ok=0
+    echo -e "${RED}  ✗ ${p} 转发启动失败${NC}"
+  fi
+done
+[ "$ok" -eq 1 ] && echo -e "\n${GREEN}[成功] 快捷中转已添加。iptables 模式性能更好；socat 模式更兼容。${NC}" || echo -e "\n${YELLOW}[警告] 部分转发启动失败，请检查规则。${NC}"
+pause_for_enter
+}
+
+remove_port_forward() {
+clear_screen; print_divider
+print_center "[ 删除端口转发 ]" "$CYAN"
+shopt -s nullglob
+local files=("${PORT_FORWARD_STATE_DIR}"/*.conf)
+shopt -u nullglob
+if [ ${#files[@]} -eq 0 ]; then echo -e "${YELLOW}暂无 VPSBox 管理的端口转发。${NC}"; pause_for_enter; return; fi
+local i f
+for i in "${!files[@]}"; do
+  unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+  . "${files[$i]}" 2>/dev/null || true
+  echo -e "  ${GREEN}$((i+1)).${NC} ${PROTO:-?} :${LISTEN_PORT:-?} -> ${TARGET_HOST:-?}:${TARGET_PORT:-?} (${MODE:-?})"
+done
+read -r -p "> 请输入要删除的编号 (0 取消): " del_idx
+del_idx="${del_idx// /}"
+[ "$del_idx" = "0" ] && return
+if ! [[ "$del_idx" =~ ^[0-9]+$ ]] || [ "$del_idx" -lt 1 ] || [ "$del_idx" -gt "${#files[@]}" ]; then echo -e "${RED}[错误] 编号无效。${NC}"; pause_for_enter; return; fi
+f="${files[$((del_idx-1))]}"
+unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+. "$f" 2>/dev/null || true
+if ! confirm_action "删除转发 ${PROTO} :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}" "n"; then pause_for_enter; return; fi
+if [ "${MODE:-}" = "iptables" ]; then
+  _remove_iptables_forward "$LISTEN_PORT" "$PROTO" "$TARGET_IP" "$TARGET_PORT"
+else
+  [ -n "${UNIT:-}" ] && systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+  [ -n "${LISTEN_PORT:-}" ] && [ -n "${PROTO:-}" ] && rm -f "$(_forward_unit_file "$LISTEN_PORT" "$PROTO")"
+fi
+rm -f "$f"
+_svc_daemon_reload >/dev/null 2>&1 || true
+echo -e "\n${GREEN}[成功] 转发规则已删除。${NC}"
+pause_for_enter
+}
+
+manage_port_forward() {
+while true; do
+menu_header "端口转发"
+_list_port_forwards >/dev/null || true
+echo ""
+menu_pair 1 "添加转发" 2 "删除转发"
+menu_back_hint
+_read_menu_choice pf_opt "> 请选择 [0-2]: "
+[ -z "$pf_opt" ] && continue
+case "$pf_opt" in
+  1) add_port_forward ;;
+  2) remove_port_forward ;;
+  0) return ;;
+  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
 manage_ufw() {
 while true; do
 clear_screen; print_divider
@@ -4083,19 +4486,22 @@ menu_header "节点管理"
 echo -e "  ${CYAN}部署新节点${NC}"
 menu_pair 1 "VLESS-Reality" 2 "VLESS-WS-TLS"
 menu_pair 3 "AnyTLS" 4 "Hysteria2"
+menu_pair 5 "Shadowsocks" 6 "端口转发"
 echo ""
 echo -e "  ${CYAN}已部署节点${NC}"
-menu_pair 5 "查看节点" 6 "删除节点"
+menu_pair 7 "查看节点" 8 "删除节点"
 menu_back_hint
-_read_menu_choice node_opt "> 请选择 [0-6]: "
+_read_menu_choice node_opt "> 请选择 [0-8]: "
 [ -z "$node_opt" ] && continue
 case $node_opt in
  1) install_reality_node ;;
  2) install_ws_tls_node ;;
  3) install_anytls_node ;;
  4) install_hy2_node ;;
- 5) view_deployed_nodes ;;
- 6) delete_node ;;
+ 5) install_ss_node ;;
+ 6) manage_port_forward ;;
+ 7) view_deployed_nodes ;;
+ 8) delete_node ;;
  0) return ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
