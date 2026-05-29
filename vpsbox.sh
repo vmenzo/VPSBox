@@ -3812,7 +3812,7 @@ pause_for_enter
 manage_port_forward() {
 while true; do
 menu_header "端口转发"
-_list_port_forwards >/dev/null || true
+_list_port_forwards || true
 echo ""
 menu_pair 1 "添加转发" 2 "删除转发"
 menu_back_hint
