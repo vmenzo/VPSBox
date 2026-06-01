@@ -3414,22 +3414,41 @@ pause_for_enter
 }
 
 _setup_hy2_port_hopping() {
-  local target_port="$1" range="$2" start end
+  local target_port="$1" range="$2" start end configured=0 ipt=""
   if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 1; fi
   start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
   _valid_port "$start" && _valid_port "$end" && [ "$start" -le "$end" ] || return 1
 
   if command -v iptables >/dev/null 2>&1; then
-    iptables -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
-      iptables -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
-    iptables -t nat -C OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
-      iptables -t nat -A OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+    ipt="$(command -v iptables)"
+  elif [ -x /usr/sbin/iptables ]; then
+    ipt="/usr/sbin/iptables"
+  elif [ -x /sbin/iptables ]; then
+    ipt="/sbin/iptables"
+  fi
+
+  if [ -n "$ipt" ]; then
+    "$ipt" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
+      "$ipt" -t nat -A PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+    "$ipt" -t nat -C OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || \
+      "$ipt" -t nat -A OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+    if "$ipt" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; then
+      configured=1
+    fi
+  fi
+
+  if [ "$configured" -ne 1 ]; then
+    echo -e "${RED}[错误] 未能写入 HY2 UDP 端口跳跃规则：系统缺少可用的 iptables，或规则写入失败。${NC}"
+    echo -e "${YELLOW}  请先安装 iptables/nftables，或手动添加 UDP ${start}-${end} -> ${target_port} 的 REDIRECT/DNAT。${NC}"
+    return 1
   fi
 
   if command -v netfilter-persistent >/dev/null 2>&1; then
     netfilter-persistent save >/dev/null 2>&1 || true
   elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
     iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  elif [ -x /usr/sbin/iptables-save ] && [ -d /etc/iptables ]; then
+    /usr/sbin/iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   fi
 
   _ufw_allow_if_active "$target_port" udp
@@ -3531,7 +3550,11 @@ ${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pau
 NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
-LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0#H2"
+LINK="hysteria2://${HY2_PASS}@${DOMAIN}:${HY2_PORT}/?sni=${DOMAIN}&alpn=h3&insecure=0"
+if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
+    LINK="${LINK}&mport=${HY2_HOP_RANGE}"
+fi
+LINK="${LINK}#H2"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
     _ufw_allow_if_active "$HY2_PORT" udp
