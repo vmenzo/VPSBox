@@ -481,6 +481,52 @@ _node_meta_upsert() {
   fi
 }
 
+_iptables_bin() {
+  if command -v iptables >/dev/null 2>&1; then
+    command -v iptables
+  elif [ -x /usr/sbin/iptables ]; then
+    echo /usr/sbin/iptables
+  elif [ -x /sbin/iptables ]; then
+    echo /sbin/iptables
+  else
+    return 1
+  fi
+}
+
+_save_iptables_if_possible() {
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  elif [ -x /usr/sbin/iptables-save ] && [ -d /etc/iptables ]; then
+    /usr/sbin/iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  fi
+}
+
+_extract_mport_from_link() {
+  local link="$1"
+  printf '%s
+' "$link" | grep -oE '(^|[?&])mport=[0-9]+-[0-9]+' | head -n 1 | sed 's/^.*mport=//'
+}
+
+_remove_hy2_port_hopping() {
+  local target_port="$1" link="$2" range start end ipt
+  range=$(_extract_mport_from_link "$link")
+  [ -n "$range" ] || return 0
+  if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 0; fi
+  start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+  _valid_port "$start" && _valid_port "$end" && [ "$start" -le "$end" ] || return 0
+  ipt=$(_iptables_bin) || return 0
+  while "$ipt" -t nat -C PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; do
+    "$ipt" -t nat -D PREROUTING -p udp --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || break
+  done
+  while "$ipt" -t nat -C OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; do
+    "$ipt" -t nat -D OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || break
+  done
+  _save_iptables_if_possible
+  echo -e "${GREEN}  ✓ 已清理 HY2 UDP 端口跳跃规则: ${start}-${end} -> ${target_port}${NC}"
+}
+
 _ensure_xray_service_reload_support() {
   if [ ! -d /etc/systemd/system ]; then return 0; fi
   local bin_path
@@ -709,10 +755,12 @@ persist_node_runtime() {
 
 remove_node_runtime() {
   local core_name="$1" port="$2"
-  local meta_file fragment_file node_dir backup_fragment
+  local meta_file fragment_file node_dir backup_fragment node_link node_protocol
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
+  node_link=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
+  node_protocol=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
   fragment_file=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
   if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
     shopt -s nullglob
@@ -740,6 +788,9 @@ remove_node_runtime() {
     return 1
   fi
   rm -f "$backup_fragment"
+  if [ "$node_protocol" = "hysteria2" ]; then
+    _remove_hy2_port_hopping "$port" "$node_link" || true
+  fi
   _node_meta_remove_port "$core_name" "$port" || true
   return 0
 }
@@ -3559,7 +3610,12 @@ LINK="${LINK}#H2"
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
     _ufw_allow_if_active "$HY2_PORT" udp
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
-        _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"
+        if ! _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"; then
+            echo -e "\n${RED}[错误] 端口跳跃规则创建失败，正在回滚本次 HY2 节点。${NC}"
+            remove_node_runtime "$CORE_NAME" "$HY2_PORT" >/dev/null 2>&1 || true
+            pause_for_enter
+            return
+        fi
     fi
     output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
