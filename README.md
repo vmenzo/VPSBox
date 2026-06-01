@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.8.11-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.9.0-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.8.11</b>
+  <b>当前版本：v1.9.0</b>
 </p>
 
 ---
@@ -141,9 +141,11 @@ VPS Box 适合以下几类用户：
 - **AnyTLS**
 - **Hysteria2**
 - **Shadowsocks**
-- **快捷中转 / 端口转发**
+- **快捷中转 / 端口转发管理**
 
 其中 Hysteria2 支持可选 UDP 端口跳跃：开启后会自动写入 `mport=起始端口-结束端口` 分享参数，并创建对应的 UDP REDIRECT 规则；删除节点时也会自动清理该节点对应的跳跃规则，避免残留防火墙配置。
+
+快捷中转 / 端口转发支持添加、查看和删除，入口在「节点管理 → 端口转发管理」。删除转发时会同步清理 VPSBox 创建的 iptables DNAT / MASQUERADE 规则或 socat systemd 服务。
 
 并支持围绕 Xray / Sing-box 进行部署和管理。
 
@@ -206,6 +208,12 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.9.0
+
+- 版本升级到 `v1.9.0`，集中标记 HY2 端口跳跃与快捷中转管理修复
+- 将节点菜单里的「端口转发」入口改为「端口转发管理」，明确包含添加 / 查看 / 删除
+- README 补充快捷中转 / 端口转发删除入口与清理行为说明
 
 ### v1.8.11
 

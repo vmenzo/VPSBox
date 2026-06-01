@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.11 — 修复端口转发规则补齐、删除与重复添加保护
+# 版本: v1.9.0 — 完善 HY2 端口跳跃与快捷中转管理
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.11"
+VPSBOX_VERSION="v1.9.0"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -4598,7 +4598,7 @@ menu_header "节点管理"
 echo -e "  ${CYAN}部署新节点${NC}"
 menu_pair 1 "VLESS-Reality" 2 "VLESS-WS-TLS"
 menu_pair 3 "AnyTLS" 4 "Hysteria2"
-menu_pair 5 "Shadowsocks" 6 "端口转发"
+menu_pair 5 "Shadowsocks" 6 "端口转发管理"
 echo ""
 echo -e "  ${CYAN}已部署节点${NC}"
 menu_pair 7 "查看节点" 8 "删除节点"
