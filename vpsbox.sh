@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.8.10 — 修复 HY2 端口跳跃链接、规则创建校验与删除清理
+# 版本: v1.8.11 — 修复端口转发规则补齐、删除与重复添加保护
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.8.10"
+VPSBOX_VERSION="v1.8.11"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3672,37 +3672,53 @@ EOFIPF
   fi
 }
 
-_iptables_rule() {
-  local action="$1" listen_port="$2" proto="$3" target_ip="$4" target_port="$5"
-  iptables -t nat "$action" PREROUTING -p "$proto" --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null || return 1
-  iptables -t nat "$action" OUTPUT -p "$proto" -o lo --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null || true
-  iptables -t nat "$action" POSTROUTING -p "$proto" -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null || true
+_iptables_forward_rule() {
+  local action="$1" chain="$2" listen_port="$3" proto="$4" target_ip="$5" target_port="$6" ipt
+  ipt=$(_iptables_bin) || return 1
+  case "$chain" in
+    PREROUTING)
+      "$ipt" -t nat "$action" PREROUTING -p "$proto" --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null
+      ;;
+    OUTPUT)
+      "$ipt" -t nat "$action" OUTPUT -p "$proto" -o lo --dport "$listen_port" -j DNAT --to-destination "${target_ip}:${target_port}" 2>/dev/null
+      ;;
+    POSTROUTING)
+      "$ipt" -t nat "$action" POSTROUTING -p "$proto" -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_ensure_iptables_forward_rule() {
+  local listen_port="$1" proto="$2" target_ip="$3" target_port="$4" chain
+  for chain in PREROUTING OUTPUT POSTROUTING; do
+    _iptables_forward_rule -C "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || \
+      _iptables_forward_rule -A "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
+  done
+}
+
+_delete_iptables_forward_rule() {
+  local listen_port="$1" proto="$2" target_ip="$3" target_port="$4" chain
+  for chain in PREROUTING OUTPUT POSTROUTING; do
+    while _iptables_forward_rule -C "$chain" "$listen_port" "$proto" "$target_ip" "$target_port"; do
+      _iptables_forward_rule -D "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || break
+    done
+  done
 }
 
 _apply_iptables_forward() {
   local listen_port="$1" proto="$2" target_ip="$3" target_port="$4"
-  command -v iptables >/dev/null 2>&1 || return 1
+  _iptables_bin >/dev/null 2>&1 || return 1
   _enable_ipv4_forwarding
-  _iptables_rule -C "$listen_port" "$proto" "$target_ip" "$target_port" || \
-    _iptables_rule -A "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
-  if command -v netfilter-persistent >/dev/null 2>&1; then
-    netfilter-persistent save >/dev/null 2>&1 || true
-  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-  fi
+  _ensure_iptables_forward_rule "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
+  _save_iptables_if_possible
 }
 
 _remove_iptables_forward() {
   local listen_port="$1" proto="$2" target_ip="$3" target_port="$4"
-  command -v iptables >/dev/null 2>&1 || return 0
-  while _iptables_rule -C "$listen_port" "$proto" "$target_ip" "$target_port"; do
-    _iptables_rule -D "$listen_port" "$proto" "$target_ip" "$target_port" || break
-  done
-  if command -v netfilter-persistent >/dev/null 2>&1; then
-    netfilter-persistent save >/dev/null 2>&1 || true
-  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-  fi
+  _iptables_bin >/dev/null 2>&1 || return 0
+  _delete_iptables_forward_rule "$listen_port" "$proto" "$target_ip" "$target_port"
+  _save_iptables_if_possible
 }
 
 _forward_unit_name() {
@@ -3836,9 +3852,26 @@ case "$proto_choice" in
 esac
 done
 
+local existing_forward=0 existing_file existing_desc p
+for p in $protos; do
+  existing_file=$(_forward_state_file "$listen_port" "$p")
+  if [ -f "$existing_file" ]; then
+    unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+    . "$existing_file" 2>/dev/null || true
+    existing_desc="${PROTO:-$p} :${LISTEN_PORT:-$listen_port} -> ${TARGET_HOST:-?}:${TARGET_PORT:-?} (${MODE:-?})"
+    echo -e "${RED}[错误] 已存在同协议同端口的转发：${existing_desc}${NC}"
+    existing_forward=1
+  fi
+done
+if [ "$existing_forward" -eq 1 ]; then
+  echo -e "${YELLOW}请先删除旧转发，再重新添加，避免残留 DNAT 规则。${NC}"
+  pause_for_enter
+  return
+fi
+
 if ! confirm_action "添加快捷中转 ${listen_port} -> ${target_host}:${target_port}"; then pause_for_enter; return; fi
 install_dependencies
-local ok=1 p before_mode state_file
+local ok=1 before_mode state_file
 for p in $protos; do
   if _apply_port_forward "$listen_port" "$p" "$target_host" "$target_port"; then
     _ufw_allow_if_active "$listen_port" "$p"

@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.8.10-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.8.11-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.8.10</b>
+  <b>当前版本：v1.8.11</b>
 </p>
 
 ---
@@ -206,6 +206,13 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.8.11
+
+- 修复快捷中转 / 端口转发在 `iptables` 不在当前 `PATH` 时失败的问题
+- 创建 iptables 转发时分别校验并补齐 `PREROUTING` / `OUTPUT` / `POSTROUTING` 三类规则
+- 删除 iptables 转发时完整清理对应 DNAT / MASQUERADE 规则
+- 防止重复添加同协议同监听端口的转发，避免 state 被覆盖后旧规则残留
 
 ### v1.8.10
 
