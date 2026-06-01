@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.8.7-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.8.10-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.8.7</b>
+  <b>当前版本：v1.8.10</b>
 </p>
 
 ---
@@ -83,6 +83,7 @@ VPS Box 当前的节点部分，不再只是“生成一份配置然后结束”
 
 - 节点可继续查看
 - 节点可删除
+- HY2 端口跳跃规则随节点自动创建 / 清理
 - 配置可备份
 - 配置可恢复
 - 节点信息可长期管理
@@ -139,6 +140,10 @@ VPS Box 适合以下几类用户：
 - **VLESS-WS-TLS**
 - **AnyTLS**
 - **Hysteria2**
+- **Shadowsocks**
+- **快捷中转 / 端口转发**
+
+其中 Hysteria2 支持可选 UDP 端口跳跃：开启后会自动写入 `mport=起始端口-结束端口` 分享参数，并创建对应的 UDP REDIRECT 规则；删除节点时也会自动清理该节点对应的跳跃规则，避免残留防火墙配置。
 
 并支持围绕 Xray / Sing-box 进行部署和管理。
 
@@ -197,7 +202,17 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 
 所以这个项目更像是一个 **VPS 综合运维工作台**。
 
+
 ---
+
+## 更新记录
+
+### v1.8.10
+
+- 修复 Hysteria2 开启端口跳跃后分享链接未携带 `mport` 的问题
+- 创建 HY2 端口跳跃时校验 iptables 规则是否真实写入，失败会回滚节点
+- 删除带 `mport` 的 HY2 节点时自动清理对应 UDP 跳跃转发规则
+- 兼容 `iptables` 位于 `/usr/sbin`、但不在当前 `PATH` 的环境
 
 ## 使用方式
 
