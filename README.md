@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.9.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.10.0-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.9.0</b>
+  <b>当前版本：v1.10.0</b>
 </p>
 
 ---
@@ -147,6 +147,8 @@ VPS Box 适合以下几类用户：
 
 快捷中转 / 端口转发支持添加、查看和删除，入口在「节点管理 → 端口转发管理」。删除转发时会同步清理 VPSBox 创建的 iptables DNAT / MASQUERADE 规则或 socat systemd 服务。
 
+证书管理入口在「节点管理 → 证书管理」，支持查看 VPSBox 管理的证书、检查过期时间与 SAN、手动续签、删除证书和 acme.sh 记录。
+
 并支持围绕 Xray / Sing-box 进行部署和管理。
 
 它的重点不只是“能装”，还包括：
@@ -208,6 +210,13 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.10.0
+
+- 新增「节点管理 → 证书管理」菜单
+- 支持查看证书列表、过期时间、Subject 与 SAN
+- 支持通过 acme.sh 手动强制续签并重新安装证书
+- 支持删除证书目录与对应 acme.sh 记录
 
 ### v1.9.0
 

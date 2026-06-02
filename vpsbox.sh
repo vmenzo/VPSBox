@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.9.0 — 完善 HY2 端口跳跃与快捷中转管理
+# 版本: v1.10.0 — 增加证书管理功能
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.9.0"
+VPSBOX_VERSION="v1.10.0"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3329,6 +3329,170 @@ acquire_cert() {
     return 0
 }
 
+
+_cert_domains() {
+  local d
+  shopt -s nullglob
+  for d in /etc/vpsbox-cert/*; do
+    [ -d "$d" ] && [ -f "$d/fullchain.pem" ] && basename "$d"
+  done
+  shopt -u nullglob
+}
+
+_cert_not_after_epoch() {
+  local cert_file="$1" end
+  end=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2-)
+  [ -n "$end" ] || return 1
+  date -d "$end" +%s 2>/dev/null
+}
+
+_cert_not_after_text() {
+  local cert_file="$1"
+  openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2-
+}
+
+_cert_subject_text() {
+  local cert_file="$1"
+  openssl x509 -in "$cert_file" -noout -subject 2>/dev/null | sed 's/^subject=//'
+}
+
+_cert_san_text() {
+  local cert_file="$1"
+  openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null | sed -n '2,$p' | tr -d ' ' | tr ',' '\n' | sed 's/^/    /'
+}
+
+_list_certificates() {
+  local domains domain cert_file exp_epoch now days_left status any=0
+  domains=$(_cert_domains | sort)
+  if [ -z "$domains" ]; then
+    echo -e "${YELLOW}暂无 VPSBox 管理的证书。${NC}"
+    return 1
+  fi
+  now=$(date +%s)
+  while IFS= read -r domain; do
+    [ -n "$domain" ] || continue
+    any=1
+    cert_file="/etc/vpsbox-cert/${domain}/fullchain.pem"
+    exp_epoch=$(_cert_not_after_epoch "$cert_file" || true)
+    if [ -n "$exp_epoch" ]; then
+      days_left=$(( (exp_epoch - now) / 86400 ))
+      if [ "$days_left" -lt 0 ]; then status="${RED}已过期${NC}"
+      elif [ "$days_left" -le 15 ]; then status="${YELLOW}${days_left} 天后过期${NC}"
+      else status="${GREEN}${days_left} 天后过期${NC}"
+      fi
+      echo -e "  ${GREEN}${domain}${NC}  ${status}  ${CYAN}$(_cert_not_after_text "$cert_file")${NC}"
+    else
+      echo -e "  ${GREEN}${domain}${NC}  ${RED}证书无效${NC}"
+    fi
+  done <<< "$domains"
+  [ "$any" -eq 1 ]
+}
+
+_select_cert_domain() {
+  local __var="$1" domains=() i selected domain
+  mapfile -t domains < <(_cert_domains | sort)
+  if [ "${#domains[@]}" -eq 0 ]; then
+    echo -e "${YELLOW}暂无 VPSBox 管理的证书。${NC}"
+    return 1
+  fi
+  for i in "${!domains[@]}"; do
+    domain="${domains[$i]}"
+    echo -e "  ${GREEN}$((i+1)).${NC} ${domain}"
+  done
+  read -r -p "> 请选择证书编号 (0 取消): " selected
+  selected="${selected// /}"
+  [ "$selected" = "0" ] && return 1
+  if ! [[ "$selected" =~ ^[0-9]+$ ]] || [ "$selected" -lt 1 ] || [ "$selected" -gt "${#domains[@]}" ]; then
+    echo -e "${RED}[错误] 编号无效。${NC}"
+    return 1
+  fi
+  printf -v "$__var" '%s' "${domains[$((selected-1))]}"
+}
+
+view_certificates() {
+  clear_screen; print_divider
+  print_center "[ 查看证书 ]" "$CYAN"
+  _list_certificates || true
+  echo ""
+  local domain cert_file
+  if _select_cert_domain domain; then
+    cert_file="/etc/vpsbox-cert/${domain}/fullchain.pem"
+    echo -e "\n${CYAN}>>> 证书详情: ${YELLOW}${domain}${NC}"
+    echo -e "${CYAN}路径:${NC} /etc/vpsbox-cert/${domain}"
+    echo -e "${CYAN}主题:${NC} $(_cert_subject_text "$cert_file")"
+    echo -e "${CYAN}过期:${NC} $(_cert_not_after_text "$cert_file")"
+    echo -e "${CYAN}SAN:${NC}"
+    _cert_san_text "$cert_file" || true
+  fi
+  pause_for_enter
+}
+
+renew_certificate() {
+  clear_screen; print_divider
+  print_center "[ 手动续签证书 ]" "$CYAN"
+  local domain cert_dir
+  _list_certificates || true
+  echo ""
+  _select_cert_domain domain || { pause_for_enter; return; }
+  if [ ! -x /root/.acme.sh/acme.sh ]; then
+    echo -e "${RED}[错误] 未找到 /root/.acme.sh/acme.sh，无法续签。${NC}"
+    pause_for_enter; return
+  fi
+  if ! confirm_action "强制续签 ${domain} 并安装到 /etc/vpsbox-cert/${domain}" "n"; then pause_for_enter; return; fi
+  cert_dir="/etc/vpsbox-cert/${domain}"
+  if /root/.acme.sh/acme.sh --renew -d "$domain" --ecc --force && \
+     /root/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
+       --fullchain-file "$cert_dir/fullchain.pem" \
+       --key-file "$cert_dir/privkey.pem"; then
+    chmod 755 "$cert_dir"; chmod 644 "$cert_dir"/*.pem 2>/dev/null || true
+    chown -R nobody:nogroup "$cert_dir" 2>/dev/null || chown -R nobody:nobody "$cert_dir" 2>/dev/null || true
+    echo -e "${GREEN}[成功] 证书已续签并安装。${NC}"
+    echo -e "${YELLOW}提示：如果节点正在使用该证书，建议重启对应核心以确保加载新证书。${NC}"
+  else
+    echo -e "${RED}[错误] 证书续签失败，请检查 acme.sh 输出。${NC}"
+  fi
+  pause_for_enter
+}
+
+delete_certificate() {
+  clear_screen; print_divider
+  print_center "[ 删除证书 ]" "$CYAN"
+  local domain cert_dir
+  _list_certificates || true
+  echo ""
+  _select_cert_domain domain || { pause_for_enter; return; }
+  cert_dir="/etc/vpsbox-cert/${domain}"
+  echo -e "${YELLOW}将删除:${NC} ${cert_dir}"
+  echo -e "${YELLOW}注意：如果仍有 WS-TLS / AnyTLS / HY2 节点引用该证书，节点会失效。${NC}"
+  if ! confirm_action "删除 ${domain} 的证书文件和 acme.sh 记录" "n"; then pause_for_enter; return; fi
+  if [ -x /root/.acme.sh/acme.sh ]; then
+    /root/.acme.sh/acme.sh --remove -d "$domain" >/dev/null 2>&1 || true
+  fi
+  rm -rf "/root/.acme.sh/${domain}_ecc" "/root/.acme.sh/${domain}" "$cert_dir"
+  echo -e "${GREEN}[成功] 证书已删除。${NC}"
+  pause_for_enter
+}
+
+manage_certificates() {
+  while true; do
+    menu_header "证书管理"
+    _list_certificates || true
+    echo ""
+    menu_pair 1 "查看证书详情" 2 "手动续签证书"
+    menu_single 3 "删除证书"
+    menu_back_hint
+    _read_menu_choice cert_opt "> 请选择 [0-3]: "
+    [ -z "$cert_opt" ] && continue
+    case "$cert_opt" in
+      1) view_certificates ;;
+      2) renew_certificate ;;
+      3) delete_certificate ;;
+      0) return ;;
+      *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+    esac
+  done
+}
+
 install_ws_tls_node() {
 clear_screen; print_divider
 print_center "[ 部署 VLESS-WS-TLS 节点 ]" "$CYAN"
@@ -4599,11 +4763,12 @@ echo -e "  ${CYAN}部署新节点${NC}"
 menu_pair 1 "VLESS-Reality" 2 "VLESS-WS-TLS"
 menu_pair 3 "AnyTLS" 4 "Hysteria2"
 menu_pair 5 "Shadowsocks" 6 "端口转发管理"
+menu_single 9 "证书管理"
 echo ""
 echo -e "  ${CYAN}已部署节点${NC}"
 menu_pair 7 "查看节点" 8 "删除节点"
 menu_back_hint
-_read_menu_choice node_opt "> 请选择 [0-8]: "
+_read_menu_choice node_opt "> 请选择 [0-9]: "
 [ -z "$node_opt" ] && continue
 case $node_opt in
  1) install_reality_node ;;
@@ -4612,6 +4777,7 @@ case $node_opt in
  4) install_hy2_node ;;
  5) install_ss_node ;;
  6) manage_port_forward ;;
+ 9) manage_certificates ;;
  7) view_deployed_nodes ;;
  8) delete_node ;;
  0) return ;;
