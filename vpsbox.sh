@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.10.0 — 增加证书管理功能
+# 版本: v1.10.1 — 增强证书目录与 acme.sh 默认路径检查
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.10.0"
+VPSBOX_VERSION="v1.10.1"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3331,12 +3331,57 @@ acquire_cert() {
 
 
 _cert_domains() {
-  local d
-  shopt -s nullglob
-  for d in /etc/vpsbox-cert/*; do
-    [ -d "$d" ] && [ -f "$d/fullchain.pem" ] && basename "$d"
-  done
-  shopt -u nullglob
+  local d name
+  {
+    shopt -s nullglob
+    for d in /etc/vpsbox-cert/*; do
+      [ -d "$d" ] && { [ -f "$d/fullchain.pem" ] || [ -f "$d/privkey.pem" ]; } && basename "$d"
+    done
+    for d in /root/.acme.sh/*_ecc /root/.acme.sh/*; do
+      [ -d "$d" ] || continue
+      name=$(basename "$d")
+      name="${name%_ecc}"
+      [ -f "$d/${name}.cer" ] && echo "$name"
+    done
+    shopt -u nullglob
+  } | sort -u
+}
+
+_cert_installed_file() {
+  local domain="$1"
+  local file="/etc/vpsbox-cert/${domain}/fullchain.pem"
+  [ -f "$file" ] && echo "$file"
+}
+
+_cert_acme_file() {
+  local domain="$1" file
+  file="/root/.acme.sh/${domain}_ecc/${domain}.cer"
+  [ -f "$file" ] && { echo "$file"; return 0; }
+  file="/root/.acme.sh/${domain}/${domain}.cer"
+  [ -f "$file" ] && { echo "$file"; return 0; }
+  return 1
+}
+
+_cert_display_file() {
+  local domain="$1" file
+  file=$(_cert_installed_file "$domain") && { echo "$file"; return 0; }
+  file=$(_cert_acme_file "$domain") && { echo "$file"; return 0; }
+  return 1
+}
+
+_cert_key_status() {
+  local domain="$1" installed_key acme_key
+  installed_key="/etc/vpsbox-cert/${domain}/privkey.pem"
+  if [ -f "$installed_key" ]; then
+    echo "installed-key"
+    return 0
+  fi
+  acme_key="/root/.acme.sh/${domain}_ecc/${domain}.key"
+  [ -f "$acme_key" ] && { echo "acme-key"; return 0; }
+  acme_key="/root/.acme.sh/${domain}/${domain}.key"
+  [ -f "$acme_key" ] && { echo "acme-key"; return 0; }
+  echo "missing-key"
+  return 1
 }
 
 _cert_not_after_epoch() {
@@ -3362,32 +3407,42 @@ _cert_san_text() {
 }
 
 _list_certificates() {
-  local domains domain cert_file exp_epoch now days_left status any=0
+  local domains domain cert_file exp_epoch now days_left status any=0 source key_status
   domains=$(_cert_domains | sort)
   if [ -z "$domains" ]; then
-    echo -e "${YELLOW}暂无 VPSBox 管理的证书。${NC}"
+    echo -e "${YELLOW}暂无 VPSBox/acme.sh 管理的证书。${NC}"
     return 1
   fi
   now=$(date +%s)
   while IFS= read -r domain; do
     [ -n "$domain" ] || continue
     any=1
-    cert_file="/etc/vpsbox-cert/${domain}/fullchain.pem"
-    exp_epoch=$(_cert_not_after_epoch "$cert_file" || true)
-    if [ -n "$exp_epoch" ]; then
-      days_left=$(( (exp_epoch - now) / 86400 ))
-      if [ "$days_left" -lt 0 ]; then status="${RED}已过期${NC}"
-      elif [ "$days_left" -le 15 ]; then status="${YELLOW}${days_left} 天后过期${NC}"
-      else status="${GREEN}${days_left} 天后过期${NC}"
-      fi
-      echo -e "  ${GREEN}${domain}${NC}  ${status}  ${CYAN}$(_cert_not_after_text "$cert_file")${NC}"
+    cert_file=$(_cert_display_file "$domain" || true)
+    if [ -n "$(_cert_installed_file "$domain" || true)" ]; then
+      source="installed+acme"
+      [ -z "$(_cert_acme_file "$domain" || true)" ] && source="installed-only"
     else
-      echo -e "  ${GREEN}${domain}${NC}  ${RED}证书无效${NC}"
+      source="acme-only"
+    fi
+    key_status=$(_cert_key_status "$domain" || true)
+    if [ -n "$cert_file" ]; then
+      exp_epoch=$(_cert_not_after_epoch "$cert_file" || true)
+      if [ -n "$exp_epoch" ]; then
+        days_left=$(( (exp_epoch - now) / 86400 ))
+        if [ "$days_left" -lt 0 ]; then status="${RED}已过期${NC}"
+        elif [ "$days_left" -le 15 ]; then status="${YELLOW}${days_left} 天后过期${NC}"
+        else status="${GREEN}${days_left} 天后过期${NC}"
+        fi
+        echo -e "  ${GREEN}${domain}${NC}  ${status}  ${CYAN}$(_cert_not_after_text "$cert_file")${NC}  ${YELLOW}${source}/${key_status}${NC}"
+      else
+        echo -e "  ${GREEN}${domain}${NC}  ${RED}证书无效${NC}  ${YELLOW}${source}/${key_status}${NC}"
+      fi
+    else
+      echo -e "  ${GREEN}${domain}${NC}  ${RED}未找到证书文件${NC}  ${YELLOW}${source}/${key_status}${NC}"
     fi
   done <<< "$domains"
   [ "$any" -eq 1 ]
 }
-
 _select_cert_domain() {
   local __var="$1" domains=() i selected domain
   mapfile -t domains < <(_cert_domains | sort)
@@ -3416,9 +3471,13 @@ view_certificates() {
   echo ""
   local domain cert_file
   if _select_cert_domain domain; then
-    cert_file="/etc/vpsbox-cert/${domain}/fullchain.pem"
+    cert_file=$(_cert_display_file "$domain" || true)
     echo -e "\n${CYAN}>>> 证书详情: ${YELLOW}${domain}${NC}"
-    echo -e "${CYAN}路径:${NC} /etc/vpsbox-cert/${domain}"
+    echo -e "${CYAN}安装目录:${NC} /etc/vpsbox-cert/${domain}"
+    echo -e "${CYAN}安装证书:${NC} $(_cert_installed_file "$domain" || echo "缺失")"
+    echo -e "${CYAN}acme 证书:${NC} $(_cert_acme_file "$domain" || echo "缺失")"
+    echo -e "${CYAN}私钥状态:${NC} $(_cert_key_status "$domain" || true)"
+    if [ -z "$cert_file" ]; then echo -e "${RED}[错误] 未找到可解析的证书文件。${NC}"; pause_for_enter; return; fi
     echo -e "${CYAN}主题:${NC} $(_cert_subject_text "$cert_file")"
     echo -e "${CYAN}过期:${NC} $(_cert_not_after_text "$cert_file")"
     echo -e "${CYAN}SAN:${NC}"
