@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.10.1-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.10.2-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.10.1</b>
+  <b>当前版本：v1.10.2</b>
 </p>
 
 ---
@@ -210,6 +210,11 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.10.2
+
+- 修复证书详情 / 续签 / 删除选择证书后域名回传为空的问题
+- 避免 `_select_cert_domain` 内部局部变量遮蔽调用方变量
 
 ### v1.10.1
 

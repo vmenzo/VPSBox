@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.10.1 — 增强证书目录与 acme.sh 默认路径检查
+# 版本: v1.10.2 — 修复证书详情选择域名回传
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.10.1"
+VPSBOX_VERSION="v1.10.2"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -3444,15 +3444,15 @@ _list_certificates() {
   [ "$any" -eq 1 ]
 }
 _select_cert_domain() {
-  local __var="$1" domains=() i selected domain
+  local __var="$1" domains=() i selected cert_domain
   mapfile -t domains < <(_cert_domains | sort)
   if [ "${#domains[@]}" -eq 0 ]; then
     echo -e "${YELLOW}暂无 VPSBox 管理的证书。${NC}"
     return 1
   fi
   for i in "${!domains[@]}"; do
-    domain="${domains[$i]}"
-    echo -e "  ${GREEN}$((i+1)).${NC} ${domain}"
+    cert_domain="${domains[$i]}"
+    echo -e "  ${GREEN}$((i+1)).${NC} ${cert_domain}"
   done
   read -r -p "> 请选择证书编号 (0 取消): " selected
   selected="${selected// /}"
