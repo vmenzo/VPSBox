@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.12.1-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.12.2-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.12.1</b>
+  <b>当前版本：v1.12.2</b>
 </p>
 
 ---
@@ -214,6 +214,15 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.12.2
+
+- 移除 `grep -P` 用法，避免 Alpine / BusyBox 环境下版本检测失败
+- Debian backports 代号解析改用通用 `awk` 写法
+- 服务管理不再写死 `/bin/systemctl`，提升精简系统和非 systemd 环境兼容性
+- 服务 PID 读取增加 `pgrep` 回退，避免容器里 `systemctl` 不可用时热重载判断失效
+- sing-box 安装入口更新为当前官方地址，减少旧域名跳转依赖
+- 启动时 `/etc/hosts` 不可写时静默跳过主机名映射补全，避免容器环境报错刷屏
 
 ### v1.12.1
 
