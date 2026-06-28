@@ -5109,21 +5109,10 @@ _ai_cmd_path() {
     echo "$p"
     return 0
   fi
-  for p in "/usr/local/bin/$cmd" "/root/.local/bin/$cmd" "${HOME}/.local/bin/$cmd"; do
+  for p in "${HOME}/.local/bin/$cmd" "/root/.local/bin/$cmd" "/usr/local/bin/$cmd"; do
     [ -x "$p" ] && { echo "$p"; return 0; }
   done
   return 1
-}
-
-_ai_link_command_if_needed() {
-  local cmd="$1" src
-  command -v "$cmd" >/dev/null 2>&1 && return 0
-  for src in "/root/.local/bin/$cmd" "${HOME}/.local/bin/$cmd"; do
-    if [ -x "$src" ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
-      ln -sf "$src" "/usr/local/bin/$cmd" 2>/dev/null || true
-      return 0
-    fi
-  done
 }
 
 _ai_version_line() {
@@ -5140,8 +5129,18 @@ _ai_version_line() {
 ai_tools_status() {
   clear_screen; print_divider
   print_center "[ AI 工具状态 ]" "$CYAN"
+  local codex_base claude_base codex_provider
   _ai_version_line "Codex CLI" "codex"
   _ai_version_line "Claude Code" "claude"
+  codex_provider=$(_codex_config_value model_provider)
+  codex_base=$(_codex_provider_config_value vpsbox_proxy base_url)
+  claude_base=$(_claude_env_value ANTHROPIC_BASE_URL)
+  echo ""
+  echo -e "  ${CYAN}Codex Provider:${NC} ${codex_provider:-默认}"
+  echo -e "  ${CYAN}Codex 中转:${NC} ${codex_base:-未配置}"
+  echo -e "  ${CYAN}Claude 中转:${NC} ${claude_base:-未配置}"
+  echo -e "  ${CYAN}Codex API Key:${NC} $([ -n "$(_codex_env_value OPENAI_API_KEY)" ] && echo 已配置 || echo 未配置)"
+  echo -e "  ${CYAN}Claude API Key:${NC} $([ -n "$(_claude_env_value ANTHROPIC_API_KEY)" ] && echo 已配置 || echo 未配置)"
   echo ""
   echo -e "  ${YELLOW}认证说明:${NC}"
   echo -e "  - Codex CLI 安装后运行 ${GREEN}codex login${NC} 登录"
@@ -5153,18 +5152,17 @@ install_codex_cli() {
   clear_screen; print_divider
   print_center "[ 安装 / 更新 Codex CLI ]" "$CYAN"
   echo -e "  ${CYAN}官方安装脚本:${NC} ${CODEX_CLI_INSTALL_SCRIPT_URL}"
-  echo -e "  ${CYAN}安装位置:${NC} /usr/local/bin/codex"
+  echo -e "  ${CYAN}安装位置:${NC} 使用官方安装器默认位置"
   echo ""
   if ! confirm_action "安装或更新 Codex CLI"; then pause_for_enter; return; fi
   echo -e "\n${CYAN}>>> 正在运行 Codex CLI 官方安装器...${NC}"
-  if _run_remote_shell_with_env sh "$CODEX_CLI_INSTALL_SCRIPT_URL" CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=/usr/local/bin; then
-    _ai_link_command_if_needed codex
+  if _run_remote_shell_with_env sh "$CODEX_CLI_INSTALL_SCRIPT_URL" CODEX_NON_INTERACTIVE=1; then
     if _ai_cmd_path codex >/dev/null 2>&1; then
       echo -e "\n${GREEN}[成功] Codex CLI 已安装 / 更新。${NC}"
       _ai_version_line "Codex CLI" "codex"
       echo -e "  ${YELLOW}首次使用请运行:${NC} codex login"
     else
-      echo -e "\n${YELLOW}[警告] 安装器已完成，但未在 PATH 中检测到 codex。请检查 /usr/local/bin 或 ~/.local/bin。${NC}"
+      echo -e "\n${YELLOW}[警告] 安装器已完成，但未检测到 codex。请重新打开终端或检查 ~/.local/bin。${NC}"
     fi
   else
     echo -e "\n${RED}[错误] Codex CLI 安装 / 更新失败。${NC}"
@@ -5180,13 +5178,12 @@ install_claude_code() {
   if ! confirm_action "安装或更新 Claude Code"; then pause_for_enter; return; fi
   echo -e "\n${CYAN}>>> 正在运行 Claude Code 官方安装器...${NC}"
   if _run_remote_shell_with_env bash "$CLAUDE_CODE_INSTALL_SCRIPT_URL"; then
-    _ai_link_command_if_needed claude
     if _ai_cmd_path claude >/dev/null 2>&1; then
       echo -e "\n${GREEN}[成功] Claude Code 已安装 / 更新。${NC}"
       _ai_version_line "Claude Code" "claude"
       echo -e "  ${YELLOW}首次使用请运行:${NC} claude"
     else
-      echo -e "\n${YELLOW}[警告] 安装器已完成，但未在 PATH 中检测到 claude。请检查 /usr/local/bin 或 ~/.local/bin。${NC}"
+      echo -e "\n${YELLOW}[警告] 安装器已完成，但未检测到 claude。请重新打开终端或检查 ~/.local/bin。${NC}"
     fi
   else
     echo -e "\n${RED}[错误] Claude Code 安装 / 更新失败。${NC}"
@@ -5211,6 +5208,224 @@ update_claude_code() {
   else
     echo -e "\n${YELLOW}[警告] claude update 执行失败，可尝试重新运行官方安装器。${NC}"
   fi
+  pause_for_enter
+}
+
+_escape_toml_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+_escape_json_string() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+_codex_config_file() {
+  echo "${CODEX_HOME:-${HOME}/.codex}/config.toml"
+}
+
+_codex_env_file() {
+  echo "${CODEX_HOME:-${HOME}/.codex}/vpsbox.env"
+}
+
+_codex_config_value() {
+  local key="$1" file
+  file=$(_codex_config_file)
+  [ -f "$file" ] || return 0
+  awk -F= -v key="$key" '
+    $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+      val=$2
+      sub(/^[[:space:]]*/, "", val)
+      sub(/[[:space:]]*$/, "", val)
+      gsub(/^"/, "", val)
+      gsub(/"$/, "", val)
+      print val
+      exit
+    }
+  ' "$file"
+}
+
+_codex_env_value() {
+  local key="$1" file
+  file=$(_codex_env_file)
+  [ -f "$file" ] || return 0
+  awk -F= -v key="$key" '$1 == key {print substr($0, length(key)+2); exit}' "$file"
+}
+
+_codex_provider_config_value() {
+  local provider="$1" key="$2" file
+  file=$(_codex_config_file)
+  [ -f "$file" ] || return 0
+  awk -F= -v section="[model_providers.${provider}]" -v key="$key" '
+    $0 == section { in_section=1; next }
+    /^\[/ && in_section { exit }
+    in_section && $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+      val=$2
+      sub(/^[[:space:]]*/, "", val)
+      sub(/[[:space:]]*$/, "", val)
+      gsub(/^"/, "", val)
+      gsub(/"$/, "", val)
+      print val
+      exit
+    }
+  ' "$file"
+}
+
+_set_codex_config_key() {
+  local key="$1" value="$2" file tmp escaped
+  file=$(_codex_config_file)
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  chmod 600 "$file" 2>/dev/null || true
+  tmp=$(mktemp) || return 1
+  escaped=$(_escape_toml_string "$value")
+  awk -v key="$key" -v value="\"${escaped}\"" '
+    BEGIN { done=0 }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print key " = " value
+      done=1
+      next
+    }
+    { print }
+    END {
+      if (!done) print key " = " value
+    }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+_remove_codex_provider_block() {
+  local provider="$1" file tmp
+  file=$(_codex_config_file)
+  [ -f "$file" ] || return 0
+  tmp=$(mktemp) || return 1
+  awk -v section="[model_providers.${provider}]" '
+    $0 == section { skip=1; next }
+    /^\[/ && skip { skip=0 }
+    !skip { print }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+_append_codex_provider_block() {
+  local provider="$1" base_url="$2" file escaped
+  file=$(_codex_config_file)
+  escaped=$(_escape_toml_string "$base_url")
+  {
+    printf '\n[model_providers.%s]\n' "$provider"
+    printf 'name = "VPSBox API Proxy"\n'
+    printf 'base_url = "%s"\n' "$escaped"
+    printf 'wire_api = "responses"\n'
+    printf 'env_key = "OPENAI_API_KEY"\n'
+  } >> "$file"
+}
+
+_set_codex_env_key() {
+  local key="$1" value="$2" file tmp
+  file=$(_codex_env_file)
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  chmod 600 "$file" 2>/dev/null || true
+  tmp=$(mktemp) || return 1
+  awk -F= -v key="$key" -v value="$value" '
+    BEGIN { done=0 }
+    $1 == key { print key "=" value; done=1; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+_ensure_source_line() {
+  local profile="$1" env_file="$2" line
+  line="[ -f \"$env_file\" ] && . \"$env_file\""
+  touch "$profile" 2>/dev/null || return 0
+  grep -Fqx "$line" "$profile" 2>/dev/null && return 0
+  {
+    printf '\n# VPSBox AI proxy environment\n'
+    printf '%s\n' "$line"
+  } >> "$profile" 2>/dev/null || true
+}
+
+_set_claude_env_key() {
+  local key="$1" value="$2" file tmp escaped
+  file="${HOME}/.claude/settings.json"
+  mkdir -p "$(dirname "$file")"
+  escaped=$(_escape_json_string "$value")
+  tmp=$(mktemp) || return 1
+  if [ -s "$file" ] && command -v jq >/dev/null 2>&1; then
+    jq --arg key "$key" --arg value "$value" '.env = (.env // {}) | .env[$key] = $value' "$file" > "$tmp" && mv "$tmp" "$file"
+  elif [ -s "$file" ]; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 已存在 ${file}，但系统缺少 jq，无法安全合并 JSON。${NC}"
+    echo -e "${YELLOW}请先安装 jq，或手动在 settings.json 的 env 字段中加入 ${key}。${NC}"
+    return 1
+  else
+    cat > "$file" <<EOF
+{
+  "env": {
+    "${key}": "${escaped}"
+  }
+}
+EOF
+    rm -f "$tmp"
+  fi
+  chmod 600 "$file" 2>/dev/null || true
+}
+
+_claude_env_value() {
+  local key="$1" file
+  file="${HOME}/.claude/settings.json"
+  [ -f "$file" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg key "$key" '.env[$key] // empty' "$file" 2>/dev/null
+  else
+    sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+  fi
+}
+
+configure_codex_proxy() {
+  clear_screen; print_divider
+  print_center "[ Codex CLI 第三方 API 中转 ]" "$CYAN"
+  local base_url api_key current_base
+  current_base=$(_codex_provider_config_value vpsbox_proxy base_url)
+  echo -e "  ${CYAN}配置文件:${NC} $(_codex_config_file)"
+  echo -e "  ${CYAN}Key 文件:${NC} $(_codex_env_file)"
+  echo -e "  ${CYAN}当前中转:${NC} ${current_base:-未配置}"
+  echo ""
+  read -r -p "> OpenAI 兼容 API Base URL（如 https://api.example.com/v1，0 取消）: " base_url
+  base_url="${base_url// /}"
+  [ "$base_url" = "0" ] && return
+  [ -z "$base_url" ] && { echo -e "${RED}[错误] Base URL 不能为空。${NC}"; pause_for_enter; return; }
+  read -r -s -p "> API Key（不会显示，可留空只配置地址）: " api_key; echo ""
+  mkdir -p "$(dirname "$(_codex_config_file)")"
+  touch "$(_codex_config_file)"
+  chmod 600 "$(_codex_config_file)" 2>/dev/null || true
+  _set_codex_config_key model_provider "vpsbox_proxy" || { echo -e "${RED}[错误] 写入 Codex 配置失败。${NC}"; pause_for_enter; return; }
+  _remove_codex_provider_block vpsbox_proxy || { echo -e "${RED}[错误] 更新 Codex Provider 失败。${NC}"; pause_for_enter; return; }
+  _append_codex_provider_block vpsbox_proxy "$base_url"
+  [ -n "$api_key" ] && _set_codex_env_key OPENAI_API_KEY "$api_key"
+  _ensure_source_line "${HOME}/.bashrc" "$(_codex_env_file)"
+  _ensure_source_line "${HOME}/.profile" "$(_codex_env_file)"
+  echo -e "\n${GREEN}[完成] Codex 中转配置已写入。${NC}"
+  echo -e "${YELLOW}说明: 已创建 vpsbox_proxy provider，并将 OPENAI_API_KEY 写入 $(_codex_env_file)。${NC}"
+  echo -e "${YELLOW}重新登录终端后环境变量会自动加载；当前会话可手动执行: source $(_codex_env_file)${NC}"
+  pause_for_enter
+}
+
+configure_claude_proxy() {
+  clear_screen; print_divider
+  print_center "[ Claude Code 第三方 API 中转 ]" "$CYAN"
+  local base_url api_key current_base
+  current_base=$(_claude_env_value ANTHROPIC_BASE_URL)
+  echo -e "  ${CYAN}配置文件:${NC} ${HOME}/.claude/settings.json"
+  echo -e "  ${CYAN}当前中转:${NC} ${current_base:-未配置}"
+  echo ""
+  read -r -p "> Anthropic 兼容 API Base URL（如 https://api.example.com，0 取消）: " base_url
+  base_url="${base_url// /}"
+  [ "$base_url" = "0" ] && return
+  [ -z "$base_url" ] && { echo -e "${RED}[错误] Base URL 不能为空。${NC}"; pause_for_enter; return; }
+  read -r -s -p "> API Key（不会显示，可留空只配置地址）: " api_key; echo ""
+  _set_claude_env_key ANTHROPIC_BASE_URL "$base_url" || { echo -e "${RED}[错误] 写入 Claude 配置失败。${NC}"; pause_for_enter; return; }
+  [ -n "$api_key" ] && _set_claude_env_key ANTHROPIC_API_KEY "$api_key"
+  echo -e "\n${GREEN}[完成] Claude Code 中转配置已写入。${NC}"
+  echo -e "${YELLOW}说明: 配置写入 ~/.claude/settings.json 的 env 字段，仅影响 Claude Code 会话环境。${NC}"
   pause_for_enter
 }
 
@@ -5241,8 +5456,9 @@ echo -e "  ${CYAN}安装与维护${NC}"
 menu_pair 1 "安装/更新 Codex CLI" 2 "安装/更新 Claude Code"
 menu_pair 3 "更新 Claude Code" 4 "查看状态"
 menu_pair 5 "Codex 诊断" 6 "Claude 诊断"
+menu_pair 7 "配置 Codex 中转" 8 "配置 Claude 中转"
 menu_back_hint
-_read_menu_choice ai_opt "> 请选择 [0-6]: "
+_read_menu_choice ai_opt "> 请选择 [0-8]: "
 [ -z "$ai_opt" ] && continue
 case $ai_opt in
  1) install_codex_cli ;;
@@ -5251,6 +5467,8 @@ case $ai_opt in
  4) ai_tools_status ;;
  5) run_ai_doctor "Codex CLI" "codex" ;;
  6) run_ai_doctor "Claude Code" "claude" ;;
+ 7) configure_codex_proxy ;;
+ 8) configure_claude_proxy ;;
  0) return ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
