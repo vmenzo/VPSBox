@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.10.2 — 修复证书详情选择域名回传
+# 版本: v1.11.0 — 接入 PicVault 图床部署与管理
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.10.2"
+VPSBOX_VERSION="v1.11.0"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -40,6 +40,9 @@ XRAY_SERVICE_FILE="/etc/systemd/system/xray.service"
 SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
 PORT_FORWARD_STATE_DIR="/etc/vpsbox_port_forward"
 PORT_FORWARD_SERVICE_DIR="/etc/systemd/system"
+PICVAULT_REPO_URL="https://github.com/vmenzo/PicVault.git"
+PICVAULT_INSTALL_DIR="/opt/picvault"
+PICVAULT_DEFAULT_PORT="7899"
 
 mkdir -p "$BACKUP_DIR"
 mkdir -p "$NODE_RUNTIME_STATE_DIR" "$PORT_FORWARD_STATE_DIR"
@@ -2687,6 +2690,372 @@ fi
 pause_for_enter
 }
 
+_picvault_compose() {
+  if docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
+  else
+    return 127
+  fi
+}
+
+_picvault_require_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo -e "${YELLOW}[提示] 未检测到 Docker。${NC}"
+    if confirm_action "现在安装 Docker 与 Docker Compose"; then
+      docker_install
+    else
+      return 1
+    fi
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    _svc_start docker >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    echo -e "${RED}[错误] Docker 未运行或当前环境无法访问 Docker。${NC}"
+    return 1
+  fi
+
+  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    echo -e "${YELLOW}[提示] 未检测到 Docker Compose。${NC}"
+    if confirm_action "尝试安装 Docker Compose 插件"; then
+      if command -v apt >/dev/null 2>&1; then
+        fix_dpkg
+        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose >/dev/null 2>&1
+      elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y docker-compose-plugin >/dev/null 2>&1 || dnf install -y docker-compose >/dev/null 2>&1
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y docker-compose-plugin >/dev/null 2>&1 || yum install -y docker-compose >/dev/null 2>&1
+      elif command -v apk >/dev/null 2>&1; then
+        apk add docker-cli-compose >/dev/null 2>&1 || apk add docker-compose >/dev/null 2>&1
+      elif command -v pacman >/dev/null 2>&1; then
+        pacman -S --noconfirm docker-compose >/dev/null 2>&1
+      elif command -v zypper >/dev/null 2>&1; then
+        zypper install -y docker-compose >/dev/null 2>&1
+      fi
+    fi
+  fi
+
+  if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+    echo -e "${RED}[错误] Docker Compose 不可用，请先通过 Docker 菜单安装或手动修复 Compose。${NC}"
+    return 1
+  fi
+}
+
+_picvault_generate_secret() {
+  openssl rand -hex 24 2>/dev/null || date +%s%N | sha256sum | awk '{print $1}'
+}
+
+_picvault_public_url() {
+  local port="$1" public_url=""
+  _ensure_ip
+  printf '\n' >&2
+  read -r -p "> 访问域名或公网 URL（可留空自动使用服务器 IP:${port}）: " public_url
+  public_url="${public_url// /}"
+  if [ -n "$public_url" ]; then
+    case "$public_url" in
+      http://*|https://*) echo "$public_url" ;;
+      *) echo "https://${public_url}" ;;
+    esac
+    return
+  fi
+  echo "http://${SERVER_IP}:${port}"
+}
+
+_picvault_write_env_if_missing() {
+  local env_file="$PICVAULT_INSTALL_DIR/.env"
+  [ -f "$env_file" ] && return 0
+
+  local port public_url pg_password
+  echo ""
+  read -r -p "> PicVault 宿主机端口 [${PICVAULT_DEFAULT_PORT}]: " port
+  port="${port// /}"
+  [ -z "$port" ] && port="$PICVAULT_DEFAULT_PORT"
+  if ! _valid_port "$port"; then
+    echo -e "${RED}[错误] 端口无效。${NC}"
+    return 1
+  fi
+  if _port_is_listening "$port" tcp; then
+    echo -e "${YELLOW}[警告] TCP ${port} 已被占用，继续部署可能失败。${NC}"
+    if ! confirm_action "继续使用端口 ${port}" "n"; then
+      return 1
+    fi
+  fi
+
+  public_url=$(_picvault_public_url "$port")
+  pg_password=$(_picvault_generate_secret)
+
+  cat > "$env_file" <<EOF
+POSTGRES_USER=picvault
+POSTGRES_PASSWORD=${pg_password}
+POSTGRES_DB=picvault
+
+APP_HOST_PORT=${port}
+PICVAULT_BACKUP_DIR=/app/backups
+ALLOW_REGISTER=true
+VITE_ALLOW_REGISTER=true
+APP_PUBLIC_URL=${public_url}
+
+TRUST_PROXY=loopback, linklocal, uniquelocal
+ENABLE_HSTS=false
+FRAME_ANCESTORS=self
+TOKEN_EXPIRES_IN=7d
+PASSWORD_RESET_EXPIRES_MINUTES=30
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX=240
+ENABLE_SWAGGER=false
+
+S3_ENDPOINT=
+S3_UPLOAD_ENDPOINT=
+S3_REGION=us-east-1
+S3_BUCKET=
+S3_ACCESS_KEY=
+S3_SECRET_KEY=
+S3_FORCE_PATH_STYLE=true
+PUBLIC_IMAGE_BASE_URL=
+
+SMTP_ENABLED=false
+SMTP_HOST=
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM=
+EOF
+
+  chmod 600 "$env_file" 2>/dev/null || true
+  echo -e "${GREEN}[完成] 已生成 PicVault 环境配置: ${env_file}${NC}"
+}
+
+_picvault_clone_or_update() {
+  if [ ! -d "$PICVAULT_INSTALL_DIR/.git" ]; then
+    if [ -e "$PICVAULT_INSTALL_DIR" ] && [ -n "$(ls -A "$PICVAULT_INSTALL_DIR" 2>/dev/null)" ]; then
+      echo -e "${RED}[错误] ${PICVAULT_INSTALL_DIR} 已存在且不是 Git 仓库，请先手动处理。${NC}"
+      return 1
+    fi
+    mkdir -p "$(dirname "$PICVAULT_INSTALL_DIR")"
+    git clone "$PICVAULT_REPO_URL" "$PICVAULT_INSTALL_DIR"
+    return $?
+  fi
+
+  git -C "$PICVAULT_INSTALL_DIR" pull --ff-only
+}
+
+_picvault_show_access() {
+  local env_file="$PICVAULT_INSTALL_DIR/.env"
+  local port public_url
+  port=$(grep -E '^APP_HOST_PORT=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  public_url=$(grep -E '^APP_PUBLIC_URL=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  [ -z "$port" ] && port="$PICVAULT_DEFAULT_PORT"
+  [ -z "$public_url" ] && public_url="http://服务器IP:${port}"
+  echo ""
+  echo -e "  ${CYAN}访问地址:${NC} ${public_url}"
+  echo -e "  ${CYAN}本机端口:${NC} ${port}"
+  echo -e "  ${YELLOW}首次安装时，第一个注册成功的账号会自动成为管理员。${NC}"
+}
+
+picvault_install_or_update() {
+  clear_screen; print_divider
+  print_center "[ PicVault 图床部署 / 更新 ]" "$CYAN"
+  echo -e "  ${CYAN}安装目录:${NC} ${PICVAULT_INSTALL_DIR}"
+  echo -e "  ${CYAN}仓库地址:${NC} ${PICVAULT_REPO_URL}"
+  echo ""
+  if ! confirm_action "部署或更新 PicVault"; then pause_for_enter; return; fi
+
+  _picvault_require_docker || { pause_for_enter; return; }
+  if ! command -v git >/dev/null 2>&1; then
+    echo -e "${CYAN}>>> 正在安装 git...${NC}"
+    _pkg_install git
+  fi
+  command -v git >/dev/null 2>&1 || { echo -e "${RED}[错误] git 安装失败。${NC}"; pause_for_enter; return; }
+
+  echo -e "\n${CYAN}>>> 正在拉取 PicVault 代码...${NC}"
+  _picvault_clone_or_update || { pause_for_enter; return; }
+  _picvault_write_env_if_missing || { pause_for_enter; return; }
+
+  echo -e "\n${CYAN}>>> 正在构建并启动 PicVault，请耐心等待...${NC}"
+  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose up -d --build); then
+    local app_port
+    app_port=$(grep -E '^APP_HOST_PORT=' "$PICVAULT_INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2-)
+    echo -e "\n${GREEN}[成功] PicVault 已启动。${NC}"
+    [ -n "$app_port" ] && _ufw_allow_if_active "$app_port" tcp
+    _picvault_show_access
+  else
+    echo -e "\n${RED}[错误] PicVault 启动失败，请查看日志。${NC}"
+  fi
+  pause_for_enter
+}
+
+picvault_status() {
+  clear_screen; print_divider
+  print_center "[ PicVault 运行状态 ]" "$CYAN"
+  if [ ! -d "$PICVAULT_INSTALL_DIR" ]; then
+    echo -e "\n${YELLOW}未检测到 PicVault 安装目录: ${PICVAULT_INSTALL_DIR}${NC}"
+    pause_for_enter; return
+  fi
+  if ! _picvault_require_docker; then pause_for_enter; return; fi
+  (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose ps)
+  _picvault_show_access
+  pause_for_enter
+}
+
+picvault_logs() {
+  clear_screen; print_divider
+  print_center "[ PicVault 服务日志 ]" "$CYAN"
+  if [ ! -d "$PICVAULT_INSTALL_DIR" ]; then
+    echo -e "\n${YELLOW}未检测到 PicVault 安装目录: ${PICVAULT_INSTALL_DIR}${NC}"
+    pause_for_enter; return
+  fi
+  if ! _picvault_require_docker; then pause_for_enter; return; fi
+  echo -e "  ${GREEN}1.${NC} 全部服务"
+  echo -e "  ${GREEN}2.${NC} frontend"
+  echo -e "  ${GREEN}3.${NC} backend"
+  echo -e "  ${GREEN}4.${NC} postgres"
+  echo -e "  ${GREEN}5.${NC} redis"
+  echo -e "  ${GREEN}0.${NC} 返回"
+  echo ""
+  read -r -p "> 请选择: " log_opt
+  log_opt="${log_opt// /}"
+  case "$log_opt" in
+    1) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120) ;;
+    2) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 frontend) ;;
+    3) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 backend) ;;
+    4) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 postgres) ;;
+    5) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 redis) ;;
+    0) return 0 ;;
+    *) echo -e "\n${RED}输入无效！${NC}" ;;
+  esac
+  pause_for_enter
+}
+
+picvault_restart() {
+  clear_screen; print_divider
+  print_center "[ 重启 PicVault ]" "$CYAN"
+  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
+  _picvault_require_docker || { pause_for_enter; return; }
+  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose restart); then
+    echo -e "\n${GREEN}[成功] PicVault 已重启。${NC}"
+  else
+    echo -e "\n${RED}[错误] 重启失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+picvault_stop() {
+  clear_screen; print_divider
+  print_center "[ 停止 PicVault ]" "$CYAN"
+  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
+  _picvault_require_docker || { pause_for_enter; return; }
+  if ! confirm_action "停止 PicVault 容器" "n"; then pause_for_enter; return; fi
+  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose stop); then
+    echo -e "\n${GREEN}[成功] PicVault 已停止，数据卷保留。${NC}"
+  else
+    echo -e "\n${RED}[错误] 停止失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+picvault_backup() {
+  clear_screen; print_divider
+  print_center "[ PicVault 本机备份 ]" "$CYAN"
+  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
+  _picvault_require_docker || { pause_for_enter; return; }
+
+  local backup_root backup_file stamp db_dump storage_dump
+  backup_root="/opt/picvault-backups"
+  stamp=$(date +%Y%m%d-%H%M%S)
+  backup_file="${backup_root}/picvault-${stamp}.tgz"
+  db_dump="${backup_root}/database-${stamp}.sql"
+  storage_dump="${backup_root}/storage-${stamp}.tgz"
+  mkdir -p "$backup_root"
+
+  echo -e "\n${CYAN}>>> 正在创建 PostgreSQL 逻辑备份、本机存储和项目配置归档...${NC}"
+  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T postgres sh -lc 'pg_dump -U "${POSTGRES_USER:-picvault}" -d "${POSTGRES_DB:-picvault}"' > "$db_dump"); then
+    local tar_items=(".env" "docker-compose.yml")
+    local backup_items=("database-${stamp}.sql")
+    [ -d "$PICVAULT_INSTALL_DIR/backups" ] && tar_items+=("backups")
+    if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T backend sh -lc 'test -d /app/backend/storage && tar -C /app/backend -czf - storage || true' > "$storage_dump") && [ -s "$storage_dump" ]; then
+      backup_items+=("storage-${stamp}.tgz")
+    else
+      rm -f "$storage_dump"
+      echo -e "${YELLOW}[提示] 未能导出本机存储目录，可能当前使用的是第三方对象存储或 backend 未运行。${NC}"
+    fi
+    if tar -czf "$backup_file" \
+      -C "$PICVAULT_INSTALL_DIR" "${tar_items[@]}" \
+      -C "$backup_root" "${backup_items[@]}" 2>/dev/null; then
+      rm -f "$db_dump" "$storage_dump"
+      echo -e "\n${GREEN}[成功] 备份已生成:${NC} ${backup_file}"
+      echo -e "${YELLOW}说明: 已包含数据库、项目配置；如使用本机存储且 backend 可用，也会包含 storage 归档。${NC}"
+    else
+      echo -e "\n${RED}[错误] 归档备份失败。${NC}"
+      rm -f "$db_dump" "$storage_dump"
+    fi
+  else
+    echo -e "\n${RED}[错误] 数据库备份失败。${NC}"
+    rm -f "$db_dump" "$storage_dump"
+  fi
+  pause_for_enter
+}
+
+picvault_uninstall() {
+  clear_screen; print_divider
+  print_center "[ 卸载 PicVault ]" "$CYAN"
+  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
+  _picvault_require_docker || { pause_for_enter; return; }
+  echo -e "\n${YELLOW}[警告] 默认只停止并删除容器，保留代码目录、.env、backups 和 Docker 数据卷。${NC}"
+  echo -e "  ${GREEN}1.${NC} 保留数据卸载"
+  echo -e "  ${RED}2.${NC} 删除容器和 Docker 数据卷（会删除数据库与本机图片）"
+  echo -e "  ${GREEN}0.${NC} 返回"
+  echo ""
+  read -r -p "> 请选择: " un_opt
+  un_opt="${un_opt// /}"
+  case "$un_opt" in
+    1)
+      if confirm_action "卸载 PicVault 容器并保留数据" "n"; then
+        (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose down)
+      fi
+      ;;
+    2)
+      if confirm_action "删除 PicVault 容器和 Docker 数据卷" "n"; then
+        (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose down -v)
+      fi
+      ;;
+    0) return ;;
+    *) echo -e "\n${RED}输入无效！${NC}" ;;
+  esac
+  pause_for_enter
+}
+
+menu_picvault() {
+while true; do
+menu_header "PicVault 图床"
+echo -e "  ${CYAN}部署与维护${NC}"
+menu_pair 1 "部署/更新" 2 "查看状态"
+menu_pair 3 "查看日志" 4 "重启服务"
+menu_pair 5 "停止服务" 6 "本机备份"
+menu_single 7 "卸载"
+menu_back_hint
+_read_menu_choice pv_opt "> 请选择 [0-7]: "
+[ -z "$pv_opt" ] && continue
+case $pv_opt in
+ 1) picvault_install_or_update ;;
+ 2) picvault_status ;;
+ 3) picvault_logs ;;
+ 4) picvault_restart ;;
+ 5) picvault_stop ;;
+ 6) picvault_backup ;;
+ 7) picvault_uninstall ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
 fail2ban_install() {
 clear_screen; print_divider
 print_center "[ Fail2Ban 暴力破解防护 ]" "$CYAN"
@@ -4868,12 +5237,13 @@ echo ""
 echo -e "  ${CYAN}更多功能${NC}"
 menu_pair 19 "磁盘分区" 20 "定时任务"
 menu_pair 21 "基础工具箱" 22 "脚本管理"
+menu_single 23 "PicVault 图床"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-22]: "
+_read_menu_choice OPTION "> 请选择 [0-23]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -4898,6 +5268,7 @@ case $OPTION in
 20) crontab_manager ;;
 21) tools_manager ;;
 22) manage_script ;;
+23) menu_picvault ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac

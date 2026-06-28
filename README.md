@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.10.2-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.11.0-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.10.2</b>
+  <b>当前版本：v1.11.0</b>
 </p>
 
 ---
@@ -63,6 +63,7 @@ VPS Box 并不是单纯的“翻墙节点安装器”。
 - 定时任务管理
 - 常用工具箱安装
 - 多协议节点部署与维护
+- PicVault 图床部署与维护
 
 所以它更适合作为一台 VPS 的“总控台”，而不是一次性安装器。
 
@@ -177,6 +178,7 @@ VPS Box 适合以下几类用户：
   - 高延迟画像带缓冲上限与窗口缩放抑制，避免中高 RTT 过早顶满 `tcp_adv_win_scale` 或 `rmem_max`
   - 生成后会写入 sysctl / limits / systemd 配置，并可直接查看当前画像
 - Docker 安装
+- PicVault 图床部署、更新、状态查看、日志、重启、停止、备份和卸载
 - Fail2Ban 防暴力破解
 - Cloudflare WARP
 - UFW 防火墙管理
@@ -210,6 +212,14 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.11.0
+
+- 新增「更多功能 → PicVault 图床」菜单
+- 支持一键部署 / 更新 PicVault 到 `/opt/picvault`
+- 自动检测 Docker / Docker Compose、生成 PicVault `.env`、启动 Docker Compose
+- 支持查看状态、查看日志、重启、停止、本机备份和保守卸载
+- 首次部署会提示访问地址，并说明第一个注册账号自动成为管理员
 
 ### v1.10.2
 
