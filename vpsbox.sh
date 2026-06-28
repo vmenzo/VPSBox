@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.2
+# 版本: v1.3
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.2"
+VPSBOX_VERSION="v1.3"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -47,6 +47,8 @@ NODESEEK_BOT_REPO_URL="https://github.com/vmenzo/NodeSeek-Bot.git"
 NODESEEK_BOT_INSTALL_DIR="/opt/NodeSeek-Bot"
 NODESEEK_BOT_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/NodeSeek-Bot/main/install_vps.sh"
 SINGBOX_INSTALL_SCRIPT_URL="https://sing-box.sagernet.org/installation/tools/install.sh"
+CODEX_CLI_INSTALL_SCRIPT_URL="https://chatgpt.com/codex/install.sh"
+CLAUDE_CODE_INSTALL_SCRIPT_URL="https://claude.ai/install.sh"
 
 mkdir -p "$BACKUP_DIR"
 mkdir -p "$NODE_RUNTIME_STATE_DIR" "$PORT_FORWARD_STATE_DIR"
@@ -921,6 +923,37 @@ _run_remote_bash() {
     return 1
   fi
   bash "$tmp" "$@"
+  rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+_run_remote_shell_with_env() {
+  local shell_bin="$1" url="$2" tmp rc first_line
+  shift 2
+  tmp=$(mktemp) || return 1
+  if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp"; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 远程脚本下载失败: $url${NC}"
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 远程脚本内容为空: $url${NC}"
+    return 1
+  fi
+  first_line=$(head -n 1 "$tmp" 2>/dev/null || true)
+  if grep -qiE '<(html|!doctype html)' "$tmp"; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 下载到的内容看起来像 HTML 页面，已拒绝执行: $url${NC}"
+    return 1
+  fi
+  if [[ "$first_line" != '#!'* ]] && ! grep -qE '(^|[[:space:]])(bash|sh)[[:space:]]' "$tmp"; then
+    rm -f "$tmp"
+    echo -e "${RED}[错误] 下载内容不像可执行 shell 脚本，已拒绝执行: $url${NC}"
+    return 1
+  fi
+  env "$@" "$shell_bin" "$tmp"
   rc=$?
   rm -f "$tmp"
   return "$rc"
@@ -5070,6 +5103,160 @@ esac
 done
 }
 
+_ai_cmd_path() {
+  local cmd="$1" p
+  if p=$(command -v "$cmd" 2>/dev/null); then
+    echo "$p"
+    return 0
+  fi
+  for p in "/usr/local/bin/$cmd" "/root/.local/bin/$cmd" "${HOME}/.local/bin/$cmd"; do
+    [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+
+_ai_link_command_if_needed() {
+  local cmd="$1" src
+  command -v "$cmd" >/dev/null 2>&1 && return 0
+  for src in "/root/.local/bin/$cmd" "${HOME}/.local/bin/$cmd"; do
+    if [ -x "$src" ] && [ -d /usr/local/bin ] && [ -w /usr/local/bin ]; then
+      ln -sf "$src" "/usr/local/bin/$cmd" 2>/dev/null || true
+      return 0
+    fi
+  done
+}
+
+_ai_version_line() {
+  local name="$1" cmd="$2" path version
+  if path=$(_ai_cmd_path "$cmd"); then
+    version=$("$path" --version 2>/dev/null | head -1)
+    [ -z "$version" ] && version="已安装，版本读取失败"
+    echo -e "  ${CYAN}${name}:${NC} ${GREEN}${version}${NC}  ${path}"
+  else
+    echo -e "  ${CYAN}${name}:${NC} ${YELLOW}未安装${NC}"
+  fi
+}
+
+ai_tools_status() {
+  clear_screen; print_divider
+  print_center "[ AI 工具状态 ]" "$CYAN"
+  _ai_version_line "Codex CLI" "codex"
+  _ai_version_line "Claude Code" "claude"
+  echo ""
+  echo -e "  ${YELLOW}认证说明:${NC}"
+  echo -e "  - Codex CLI 安装后运行 ${GREEN}codex login${NC} 登录"
+  echo -e "  - Claude Code 安装后运行 ${GREEN}claude${NC} 按提示登录"
+  pause_for_enter
+}
+
+install_codex_cli() {
+  clear_screen; print_divider
+  print_center "[ 安装 / 更新 Codex CLI ]" "$CYAN"
+  echo -e "  ${CYAN}官方安装脚本:${NC} ${CODEX_CLI_INSTALL_SCRIPT_URL}"
+  echo -e "  ${CYAN}安装位置:${NC} /usr/local/bin/codex"
+  echo ""
+  if ! confirm_action "安装或更新 Codex CLI"; then pause_for_enter; return; fi
+  echo -e "\n${CYAN}>>> 正在运行 Codex CLI 官方安装器...${NC}"
+  if _run_remote_shell_with_env sh "$CODEX_CLI_INSTALL_SCRIPT_URL" CODEX_NON_INTERACTIVE=1 CODEX_INSTALL_DIR=/usr/local/bin; then
+    _ai_link_command_if_needed codex
+    if _ai_cmd_path codex >/dev/null 2>&1; then
+      echo -e "\n${GREEN}[成功] Codex CLI 已安装 / 更新。${NC}"
+      _ai_version_line "Codex CLI" "codex"
+      echo -e "  ${YELLOW}首次使用请运行:${NC} codex login"
+    else
+      echo -e "\n${YELLOW}[警告] 安装器已完成，但未在 PATH 中检测到 codex。请检查 /usr/local/bin 或 ~/.local/bin。${NC}"
+    fi
+  else
+    echo -e "\n${RED}[错误] Codex CLI 安装 / 更新失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+install_claude_code() {
+  clear_screen; print_divider
+  print_center "[ 安装 / 更新 Claude Code ]" "$CYAN"
+  echo -e "  ${CYAN}官方安装脚本:${NC} ${CLAUDE_CODE_INSTALL_SCRIPT_URL}"
+  echo ""
+  if ! confirm_action "安装或更新 Claude Code"; then pause_for_enter; return; fi
+  echo -e "\n${CYAN}>>> 正在运行 Claude Code 官方安装器...${NC}"
+  if _run_remote_shell_with_env bash "$CLAUDE_CODE_INSTALL_SCRIPT_URL"; then
+    _ai_link_command_if_needed claude
+    if _ai_cmd_path claude >/dev/null 2>&1; then
+      echo -e "\n${GREEN}[成功] Claude Code 已安装 / 更新。${NC}"
+      _ai_version_line "Claude Code" "claude"
+      echo -e "  ${YELLOW}首次使用请运行:${NC} claude"
+    else
+      echo -e "\n${YELLOW}[警告] 安装器已完成，但未在 PATH 中检测到 claude。请检查 /usr/local/bin 或 ~/.local/bin。${NC}"
+    fi
+  else
+    echo -e "\n${RED}[错误] Claude Code 安装 / 更新失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+update_claude_code() {
+  clear_screen; print_divider
+  print_center "[ 更新 Claude Code ]" "$CYAN"
+  local claude_path
+  if ! claude_path=$(_ai_cmd_path claude); then
+    echo -e "\n${YELLOW}未检测到 Claude Code，将改为执行安装流程。${NC}"
+    sleep 1
+    install_claude_code
+    return
+  fi
+  if ! confirm_action "执行 claude update"; then pause_for_enter; return; fi
+  if "$claude_path" update; then
+    echo -e "\n${GREEN}[成功] Claude Code 更新完成。${NC}"
+    _ai_version_line "Claude Code" "claude"
+  else
+    echo -e "\n${YELLOW}[警告] claude update 执行失败，可尝试重新运行官方安装器。${NC}"
+  fi
+  pause_for_enter
+}
+
+run_ai_doctor() {
+  local name="$1" cmd="$2" path
+  clear_screen; print_divider
+  print_center "[ ${name} 诊断 ]" "$CYAN"
+  if ! path=$(_ai_cmd_path "$cmd"); then
+    echo -e "\n${YELLOW}未检测到 ${name}。${NC}"
+    pause_for_enter
+    return
+  fi
+  if "$path" doctor; then
+    echo -e "\n${GREEN}[完成] 诊断命令已执行。${NC}"
+  else
+    echo -e "\n${YELLOW}[提示] 诊断命令返回非 0 状态，请按上方输出处理。${NC}"
+  fi
+  pause_for_enter
+}
+
+menu_ai_tools() {
+while true; do
+menu_header "AI 工具"
+_ai_version_line "Codex CLI" "codex"
+_ai_version_line "Claude Code" "claude"
+echo ""
+echo -e "  ${CYAN}安装与维护${NC}"
+menu_pair 1 "安装/更新 Codex CLI" 2 "安装/更新 Claude Code"
+menu_pair 3 "更新 Claude Code" 4 "查看状态"
+menu_pair 5 "Codex 诊断" 6 "Claude 诊断"
+menu_back_hint
+_read_menu_choice ai_opt "> 请选择 [0-6]: "
+[ -z "$ai_opt" ] && continue
+case $ai_opt in
+ 1) install_codex_cli ;;
+ 2) install_claude_code ;;
+ 3) update_claude_code ;;
+ 4) ai_tools_status ;;
+ 5) run_ai_doctor "Codex CLI" "codex" ;;
+ 6) run_ai_doctor "Claude Code" "claude" ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
 manage_sshkey() {
 while true; do
 clear_screen; print_divider
@@ -5550,12 +5737,13 @@ echo -e "  ${CYAN}更多功能${NC}"
 menu_pair 19 "磁盘分区" 20 "定时任务"
 menu_pair 21 "基础工具箱" 22 "脚本管理"
 menu_pair 23 "PicVault 图床" 24 "NodeSeek Bot"
+menu_single 25 "AI 工具"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-24]: "
+_read_menu_choice OPTION "> 请选择 [0-25]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -5582,6 +5770,7 @@ case $OPTION in
 22) manage_script ;;
 23) menu_picvault ;;
 24) menu_nodeseek_bot ;;
+25) menu_ai_tools ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
