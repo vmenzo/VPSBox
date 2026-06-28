@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.12.0 — 接入 NodeSeek Bot VPS 部署管理
+# 版本: v1.12.1 — 增加应用安装与更新检测
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.12.0"
+VPSBOX_VERSION="v1.12.1"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -818,6 +818,42 @@ _pkg_remove() {
   elif command -v pacman &>/dev/null; then pacman -Rns --noconfirm "$@"
   elif command -v zypper &>/dev/null; then zypper remove -y "$@"
   else echo -e "${RED}[错误] 未识别的包管理器！${NC}"; fi
+}
+
+_git_install_status() {
+  local name="$1" dir="$2" repo="$3"
+  local local_head remote_head
+
+  if [ ! -d "$dir" ]; then
+    echo -e "  ${CYAN}${name}:${NC} ${YELLOW}未安装${NC}  ${CYAN}${dir}${NC}"
+    return 1
+  fi
+
+  if [ ! -d "$dir/.git" ]; then
+    echo -e "  ${CYAN}${name}:${NC} ${RED}目录存在但不是 Git 仓库${NC}  ${CYAN}${dir}${NC}"
+    return 2
+  fi
+
+  local_head=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || true)
+  remote_head=$(git ls-remote "$repo" HEAD 2>/dev/null | awk '{print substr($1,1,7)}' | head -1)
+
+  if [ -z "$local_head" ]; then
+    echo -e "  ${CYAN}${name}:${NC} ${RED}无法读取本地版本${NC}  ${CYAN}${dir}${NC}"
+    return 2
+  fi
+
+  if [ -z "$remote_head" ]; then
+    echo -e "  ${CYAN}${name}:${NC} ${GREEN}已安装${NC}  本地 ${local_head}  ${YELLOW}远端无法检测${NC}"
+    return 3
+  fi
+
+  if [ "$local_head" = "$remote_head" ]; then
+    echo -e "  ${CYAN}${name}:${NC} ${GREEN}已安装，当前最新${NC}  ${local_head}"
+    return 0
+  fi
+
+  echo -e "  ${CYAN}${name}:${NC} ${YELLOW}需要更新${NC}  本地 ${local_head} → 远端 ${remote_head}"
+  return 4
 }
 
 _run_remote_bash() {
@@ -2897,6 +2933,7 @@ picvault_install_or_update() {
 picvault_status() {
   clear_screen; print_divider
   print_center "[ PicVault 运行状态 ]" "$CYAN"
+  _git_install_status "安装状态" "$PICVAULT_INSTALL_DIR" "$PICVAULT_REPO_URL" || true
   if [ ! -d "$PICVAULT_INSTALL_DIR" ]; then
     echo -e "\n${YELLOW}未检测到 PicVault 安装目录: ${PICVAULT_INSTALL_DIR}${NC}"
     pause_for_enter; return
@@ -3037,6 +3074,8 @@ picvault_uninstall() {
 menu_picvault() {
 while true; do
 menu_header "PicVault 图床"
+_git_install_status "安装状态" "$PICVAULT_INSTALL_DIR" "$PICVAULT_REPO_URL" || true
+echo ""
 echo -e "  ${CYAN}部署与维护${NC}"
 menu_pair 1 "部署/更新" 2 "查看状态"
 menu_pair 3 "查看日志" 4 "重启服务"
@@ -3177,6 +3216,7 @@ nodeseek_bot_manual_login() {
 nodeseek_bot_status() {
   clear_screen; print_divider
   print_center "[ NodeSeek Bot 状态 ]" "$CYAN"
+  _git_install_status "安装状态" "$NODESEEK_BOT_INSTALL_DIR" "$NODESEEK_BOT_REPO_URL" || true
   if ! _nodeseek_bot_installed; then
     echo -e "\n${YELLOW}未检测到 NodeSeek Bot 安装目录: ${NODESEEK_BOT_INSTALL_DIR}${NC}"
     pause_for_enter; return
@@ -3262,6 +3302,8 @@ nodeseek_bot_uninstall() {
 menu_nodeseek_bot() {
 while true; do
 menu_header "NodeSeek Bot"
+_git_install_status "安装状态" "$NODESEEK_BOT_INSTALL_DIR" "$NODESEEK_BOT_REPO_URL" || true
+echo ""
 echo -e "  ${CYAN}NodeSeek 每日签到 + 自动评论工具${NC}"
 echo -e "  ${YELLOW}用途: 定时签到、Cookie 失效后手动验证，可按配置开启自动评论。${NC}"
 echo ""

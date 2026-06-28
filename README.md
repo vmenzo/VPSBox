@@ -2,14 +2,14 @@
   <img src="https://img.shields.io/badge/platform-linux-blue" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/shell-bash-4EAA25?logo=gnu-bash" alt="bash">
-  <img src="https://img.shields.io/badge/version-v1.12.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.12.1-orange" alt="version">
 </p>
 
 <h1 align="center">VPS Box</h1>
 
 <p align="center">
   一个把 <b>VPS 节点部署</b>、<b>系统优化</b>、<b>安全加固</b> 和 <b>日常运维</b> 集成在一起的全能管理脚本。<br>
-  <b>当前版本：v1.12.0</b>
+  <b>当前版本：v1.12.1</b>
 </p>
 
 ---
@@ -214,6 +214,11 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 ---
 
 ## 更新记录
+
+### v1.12.1
+
+- PicVault 与 NodeSeek Bot 菜单会显示当前是否已安装、是否需要从 GitHub 更新
+- PicVault 与 NodeSeek Bot 状态页增加本地版本 / 远端版本对比
 
 ### v1.12.0
 
