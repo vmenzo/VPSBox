@@ -1,10 +1,10 @@
 #!/bin/bash
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
-# 版本: v1.11.0 — 接入 PicVault 图床部署与管理
+# 版本: v1.12.0 — 接入 NodeSeek Bot VPS 部署管理
 # 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
-VPSBOX_VERSION="v1.11.0"
+VPSBOX_VERSION="v1.12.0"
 
 # =====================================================================
 # curl|bash 兼容: 仅管道模式 [! -t 0] 重定向 stdin
@@ -43,6 +43,9 @@ PORT_FORWARD_SERVICE_DIR="/etc/systemd/system"
 PICVAULT_REPO_URL="https://github.com/vmenzo/PicVault.git"
 PICVAULT_INSTALL_DIR="/opt/picvault"
 PICVAULT_DEFAULT_PORT="7899"
+NODESEEK_BOT_REPO_URL="https://github.com/vmenzo/NodeSeek-Bot.git"
+NODESEEK_BOT_INSTALL_DIR="/opt/NodeSeek-Bot"
+NODESEEK_BOT_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/NodeSeek-Bot/main/install_vps.sh"
 
 mkdir -p "$BACKUP_DIR"
 mkdir -p "$NODE_RUNTIME_STATE_DIR" "$PORT_FORWARD_STATE_DIR"
@@ -3056,6 +3059,230 @@ esac
 done
 }
 
+_nodeseek_bot_installed() {
+  [ -d "$NODESEEK_BOT_INSTALL_DIR" ] && [ -f "$NODESEEK_BOT_INSTALL_DIR/install_vps.sh" ]
+}
+
+_nodeseek_bot_require_apt() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo -e "${RED}[错误] NodeSeek Bot 的 VPS 安装脚本当前依赖 apt-get，仅建议在 Debian / Ubuntu 系统运行。${NC}"
+    return 1
+  fi
+}
+
+_nodeseek_bot_run_installer() {
+  local mode="${1:-install}" tmp_script="" script_path=""
+  _nodeseek_bot_require_apt || return 1
+
+  if [ -f "$NODESEEK_BOT_INSTALL_DIR/install_vps.sh" ]; then
+    script_path="$NODESEEK_BOT_INSTALL_DIR/install_vps.sh"
+  else
+    tmp_script=$(mktemp) || return 1
+    if ! curl -fsSL --connect-timeout 10 --max-time 120 "$NODESEEK_BOT_INSTALL_SCRIPT_URL" -o "$tmp_script"; then
+      rm -f "$tmp_script"
+      echo -e "${RED}[错误] NodeSeek Bot 安装脚本下载失败。${NC}"
+      return 1
+    fi
+    script_path="$tmp_script"
+  fi
+
+  if ! grep -q "NodeSeek" "$script_path" || ! grep -q "install_vps" "$script_path"; then
+    [ -n "$tmp_script" ] && rm -f "$tmp_script"
+    echo -e "${RED}[错误] NodeSeek Bot 安装脚本内容异常，已拒绝执行。${NC}"
+    return 1
+  fi
+
+  REPO_URL="$NODESEEK_BOT_REPO_URL" INSTALL_DIR="$NODESEEK_BOT_INSTALL_DIR" bash "$script_path" "$mode"
+
+  local rc=$?
+  [ -n "$tmp_script" ] && rm -f "$tmp_script"
+  return "$rc"
+}
+
+_nodeseek_bot_show_info() {
+  echo ""
+  echo -e "  ${CYAN}安装目录:${NC} ${NODESEEK_BOT_INSTALL_DIR}"
+  echo -e "  ${CYAN}配置文件:${NC} ${NODESEEK_BOT_INSTALL_DIR}/.env"
+  echo -e "  ${CYAN}运行脚本:${NC} ${NODESEEK_BOT_INSTALL_DIR}/run.sh"
+  echo -e "  ${CYAN}日志文件:${NC} ${NODESEEK_BOT_INSTALL_DIR}/run.log"
+}
+
+_nodeseek_bot_remove_cron() {
+  local tmp
+  tmp=$(mktemp) || return 1
+  crontab -l 2>/dev/null | grep -v '# NodeSeek-Bot' | grep -v "$NODESEEK_BOT_INSTALL_DIR/run.sh" > "$tmp" || true
+  crontab "$tmp"
+  rm -f "$tmp"
+}
+
+nodeseek_bot_install() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot VPS 部署 / 重配 ]" "$CYAN"
+  echo -e "  ${CYAN}仓库地址:${NC} ${NODESEEK_BOT_REPO_URL}"
+  echo -e "  ${CYAN}安装目录:${NC} ${NODESEEK_BOT_INSTALL_DIR}"
+  echo ""
+  echo -e "${YELLOW}说明: 该流程会交互填写 NodeSeek 账号、YesCaptcha、Telegram 和定时任务。${NC}"
+  echo -e "${YELLOW}      已有 .env 时直接回车会保留旧值。${NC}"
+  if ! confirm_action "安装或重新配置 NodeSeek Bot"; then pause_for_enter; return; fi
+
+  if _nodeseek_bot_run_installer install; then
+    echo -e "\n${GREEN}[成功] NodeSeek Bot 已部署 / 重配完成。${NC}"
+    _nodeseek_bot_show_info
+  else
+    echo -e "\n${RED}[错误] NodeSeek Bot 部署失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+nodeseek_bot_update() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 更新 ]" "$CYAN"
+  if ! confirm_action "仅更新 NodeSeek Bot 代码和依赖，不修改 .env / cron"; then pause_for_enter; return; fi
+  if _nodeseek_bot_run_installer --update; then
+    echo -e "\n${GREEN}[成功] NodeSeek Bot 已更新。${NC}"
+    _nodeseek_bot_show_info
+  else
+    echo -e "\n${RED}[错误] NodeSeek Bot 更新失败。${NC}"
+  fi
+  pause_for_enter
+}
+
+nodeseek_bot_run_once() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 手动运行 ]" "$CYAN"
+  if ! _nodeseek_bot_installed || [ ! -x "$NODESEEK_BOT_INSTALL_DIR/run.sh" ]; then
+    echo -e "\n${YELLOW}未检测到可执行的 run.sh，请先部署 NodeSeek Bot。${NC}"
+    pause_for_enter; return
+  fi
+  if ! confirm_action "立即运行一次 NodeSeek 签到任务"; then pause_for_enter; return; fi
+  "$NODESEEK_BOT_INSTALL_DIR/run.sh"
+  pause_for_enter
+}
+
+nodeseek_bot_manual_login() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 手动验证 Cookie ]" "$CYAN"
+  if ! _nodeseek_bot_installed || [ ! -f "$NODESEEK_BOT_INSTALL_DIR/manual_login.sh" ]; then
+    echo -e "\n${YELLOW}未检测到 manual_login.sh，请先部署 NodeSeek Bot。${NC}"
+    pause_for_enter; return
+  fi
+  echo -e "${YELLOW}该功能会临时启动 Chromium + noVNC，终端会显示临时浏览器地址和密码。${NC}"
+  if ! confirm_action "启动 NodeSeek 手动验证入口"; then pause_for_enter; return; fi
+  bash "$NODESEEK_BOT_INSTALL_DIR/manual_login.sh"
+  pause_for_enter
+}
+
+nodeseek_bot_status() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 状态 ]" "$CYAN"
+  if ! _nodeseek_bot_installed; then
+    echo -e "\n${YELLOW}未检测到 NodeSeek Bot 安装目录: ${NODESEEK_BOT_INSTALL_DIR}${NC}"
+    pause_for_enter; return
+  fi
+
+  _nodeseek_bot_show_info
+  echo ""
+  echo -e "  ${CYAN}Git 版本:${NC}"
+  git -C "$NODESEEK_BOT_INSTALL_DIR" log --oneline -1 2>/dev/null || echo "  -"
+  echo ""
+  echo -e "  ${CYAN}定时任务:${NC}"
+  crontab -l 2>/dev/null | grep 'NodeSeek-Bot' || echo "  未检测到 NodeSeek-Bot cron"
+  echo ""
+  echo -e "  ${CYAN}最近日志:${NC}"
+  tail -n 40 "$NODESEEK_BOT_INSTALL_DIR/run.log" 2>/dev/null || echo "  暂无日志"
+  pause_for_enter
+}
+
+nodeseek_bot_logs() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 日志 ]" "$CYAN"
+  if [ ! -f "$NODESEEK_BOT_INSTALL_DIR/run.log" ]; then
+    echo -e "\n${YELLOW}暂无日志文件: ${NODESEEK_BOT_INSTALL_DIR}/run.log${NC}"
+    pause_for_enter; return
+  fi
+  tail -n 120 "$NODESEEK_BOT_INSTALL_DIR/run.log"
+  pause_for_enter
+}
+
+nodeseek_bot_edit_env() {
+  clear_screen; print_divider
+  print_center "[ NodeSeek Bot 配置 ]" "$CYAN"
+  if ! _nodeseek_bot_installed; then
+    echo -e "\n${YELLOW}未检测到 NodeSeek Bot，请先部署。${NC}"
+    pause_for_enter; return
+  fi
+  echo -e "${YELLOW}推荐使用“部署/重配”交互修改配置；这里会直接打开 .env。${NC}"
+  if ! confirm_action "编辑 ${NODESEEK_BOT_INSTALL_DIR}/.env" "n"; then pause_for_enter; return; fi
+  if command -v nano >/dev/null 2>&1; then
+    nano "$NODESEEK_BOT_INSTALL_DIR/.env"
+  elif command -v vim >/dev/null 2>&1; then
+    vim "$NODESEEK_BOT_INSTALL_DIR/.env"
+  else
+    echo -e "${RED}[错误] 未找到 nano 或 vim。${NC}"
+  fi
+  pause_for_enter
+}
+
+nodeseek_bot_uninstall() {
+  clear_screen; print_divider
+  print_center "[ 卸载 NodeSeek Bot ]" "$CYAN"
+  if ! _nodeseek_bot_installed; then
+    echo -e "\n${YELLOW}未检测到 NodeSeek Bot 安装目录。${NC}"
+    pause_for_enter; return
+  fi
+  echo -e "\n${YELLOW}[警告] 将移除 NodeSeek-Bot cron；默认保留安装目录和 .env。${NC}"
+  echo -e "  ${GREEN}1.${NC} 仅删除 cron，保留文件"
+  echo -e "  ${RED}2.${NC} 删除 cron 和安装目录"
+  echo -e "  ${GREEN}0.${NC} 返回"
+  echo ""
+  read -r -p "> 请选择: " ns_un_opt
+  ns_un_opt="${ns_un_opt// /}"
+  case "$ns_un_opt" in
+    1)
+      if confirm_action "删除 NodeSeek Bot 定时任务" "n"; then
+        _nodeseek_bot_remove_cron
+        echo -e "\n${GREEN}[完成] 已删除 NodeSeek Bot cron，文件保留。${NC}"
+      fi
+      ;;
+    2)
+      if confirm_action "删除 NodeSeek Bot 定时任务和安装目录" "n"; then
+        _nodeseek_bot_remove_cron
+        rm -rf "$NODESEEK_BOT_INSTALL_DIR"
+        echo -e "\n${GREEN}[完成] NodeSeek Bot 已卸载。${NC}"
+      fi
+      ;;
+    0) return ;;
+    *) echo -e "\n${RED}输入无效！${NC}" ;;
+  esac
+  pause_for_enter
+}
+
+menu_nodeseek_bot() {
+while true; do
+menu_header "NodeSeek Bot"
+echo -e "  ${CYAN}VPS 签到工具${NC}"
+menu_pair 1 "部署/重配" 2 "更新代码"
+menu_pair 3 "手动运行" 4 "手动验证"
+menu_pair 5 "查看状态" 6 "查看日志"
+menu_pair 7 "编辑配置" 8 "卸载"
+menu_back_hint
+_read_menu_choice ns_opt "> 请选择 [0-8]: "
+[ -z "$ns_opt" ] && continue
+case $ns_opt in
+ 1) nodeseek_bot_install ;;
+ 2) nodeseek_bot_update ;;
+ 3) nodeseek_bot_run_once ;;
+ 4) nodeseek_bot_manual_login ;;
+ 5) nodeseek_bot_status ;;
+ 6) nodeseek_bot_logs ;;
+ 7) nodeseek_bot_edit_env ;;
+ 8) nodeseek_bot_uninstall ;;
+ 0) return ;;
+ *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
+esac
+done
+}
+
 fail2ban_install() {
 clear_screen; print_divider
 print_center "[ Fail2Ban 暴力破解防护 ]" "$CYAN"
@@ -5237,13 +5464,13 @@ echo ""
 echo -e "  ${CYAN}更多功能${NC}"
 menu_pair 19 "磁盘分区" 20 "定时任务"
 menu_pair 21 "基础工具箱" 22 "脚本管理"
-menu_single 23 "PicVault 图床"
+menu_pair 23 "PicVault 图床" 24 "NodeSeek Bot"
 
 echo ""
 print_divider
 echo -e "  ${GREEN} 0${NC}. 退出"
 echo ""
-_read_menu_choice OPTION "> 请选择 [0-23]: "
+_read_menu_choice OPTION "> 请选择 [0-24]: "
 [ -z "$OPTION" ] && continue
 case $OPTION in
  1) system_overview ;;
@@ -5269,6 +5496,7 @@ case $OPTION in
 21) tools_manager ;;
 22) manage_script ;;
 23) menu_picvault ;;
+24) menu_nodeseek_bot ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
