@@ -64,7 +64,7 @@ VPS Box 并不是单纯的“翻墙节点安装器”。
 - 常用工具箱安装
 - 多协议节点部署与维护
 - PicVault 图床部署与维护
-- NodeSeek Bot VPS 签到工具部署与维护
+- NodeSeek Bot VPS 自动签到 + 自动评论工具部署与维护
 
 所以它更适合作为一台 VPS 的“总控台”，而不是一次性安装器。
 
@@ -180,7 +180,7 @@ VPS Box 适合以下几类用户：
   - 生成后会写入 sysctl / limits / systemd 配置，并可直接查看当前画像
 - Docker 安装
 - PicVault 图床部署、更新、状态查看、日志、重启、停止、备份和卸载
-- NodeSeek Bot 部署、更新、手动运行、手动验证、日志和卸载
+- NodeSeek Bot 部署、更新、手动运行签到、手动验证 Cookie、可选自动评论、日志和卸载
 - Fail2Ban 防暴力破解
 - Cloudflare WARP
 - UFW 防火墙管理
@@ -217,7 +217,7 @@ VPS Box 的价值在于，它试图在“简单上手”和“长期可用”之
 
 ### v1.12.0
 
-- 新增「更多功能 → NodeSeek Bot」菜单
+- 新增「更多功能 → NodeSeek Bot」菜单，用于 NodeSeek 每日签到和可选自动评论
 - 接入 NodeSeek-Bot 的 VPS 一键安装脚本，支持部署 / 重配和仅更新代码依赖
 - 支持手动运行签到、启动手动验证 Cookie、查看状态、查看日志、编辑配置和卸载
 - 对 NodeSeek Bot VPS 安装入口增加 apt 系统检测，避免在非 Debian / Ubuntu 系统误执行

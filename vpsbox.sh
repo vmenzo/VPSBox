@@ -3120,8 +3120,10 @@ nodeseek_bot_install() {
   print_center "[ NodeSeek Bot VPS 部署 / 重配 ]" "$CYAN"
   echo -e "  ${CYAN}仓库地址:${NC} ${NODESEEK_BOT_REPO_URL}"
   echo -e "  ${CYAN}安装目录:${NC} ${NODESEEK_BOT_INSTALL_DIR}"
+  echo -e "  ${CYAN}用途说明:${NC} NodeSeek 每日签到、Cookie 维护和可选自动评论"
   echo ""
   echo -e "${YELLOW}说明: 该流程会交互填写 NodeSeek 账号、YesCaptcha、Telegram 和定时任务。${NC}"
+  echo -e "${YELLOW}      默认执行每日签到；开启 NS_COMMENT 后会自动评论。${NC}"
   echo -e "${YELLOW}      已有 .env 时直接回车会保留旧值。${NC}"
   if ! confirm_action "安装或重新配置 NodeSeek Bot"; then pause_for_enter; return; fi
 
@@ -3260,7 +3262,9 @@ nodeseek_bot_uninstall() {
 menu_nodeseek_bot() {
 while true; do
 menu_header "NodeSeek Bot"
-echo -e "  ${CYAN}VPS 签到工具${NC}"
+echo -e "  ${CYAN}NodeSeek 每日签到 + 自动评论工具${NC}"
+echo -e "  ${YELLOW}用途: 定时签到、Cookie 失效后手动验证，可按配置开启自动评论。${NC}"
+echo ""
 menu_pair 1 "部署/重配" 2 "更新代码"
 menu_pair 3 "手动运行" 4 "手动验证"
 menu_pair 5 "查看状态" 6 "查看日志"
