@@ -27,6 +27,7 @@ SHORTCUT_PATH="/usr/local/bin/vpsbox"
 SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh"
 NODE_RECORD_FILE="/etc/vpsbox_nodes.txt"
 INSTALL_LOG="/tmp/vpsbox_install.log"
+CORE_INSTALL_LOG="/tmp/vpsbox_core_install.log"
 XRAY_CONFIG_FILE="/usr/local/etc/xray/config.json"
 SINGBOX_CONFIG_FILE="/etc/sing-box/config.json"
 XRAY_NODES_DIR="/usr/local/etc/xray/nodes.d"
@@ -46,7 +47,8 @@ PICVAULT_DEFAULT_PORT="7899"
 NODESEEK_BOT_REPO_URL="https://github.com/vmenzo/NodeSeek-Bot.git"
 NODESEEK_BOT_INSTALL_DIR="/opt/NodeSeek-Bot"
 NODESEEK_BOT_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/NodeSeek-Bot/main/install_vps.sh"
-SINGBOX_INSTALL_SCRIPT_URL="https://sing-box.sagernet.org/installation/tools/install.sh"
+XRAY_INSTALL_SCRIPT_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+SINGBOX_INSTALL_SCRIPT_URL="https://sing-box.app/install.sh"
 CODEX_CLI_INSTALL_SCRIPT_URL="https://chatgpt.com/codex/install.sh"
 CLAUDE_CODE_INSTALL_SCRIPT_URL="https://claude.ai/install.sh"
 
@@ -926,6 +928,44 @@ _run_remote_bash() {
   rc=$?
   rm -f "$tmp"
   return "$rc"
+}
+
+_print_core_install_failure() {
+  local core_name="$1"
+  echo -e "\n${RED}[错误] ${core_name} 核心下载或安装失败。${NC}"
+  echo -e "${YELLOW}[提示] 如果两个核心都失败，通常不是节点配置问题，而是当前 VPS 无法访问安装脚本或 GitHub Release 下载地址。${NC}"
+  echo -e "${YELLOW}[提示] 请重点检查 DNS、IPv4/IPv6 出口、GitHub/raw.githubusercontent.com/objects.githubusercontent.com 连通性。${NC}"
+  if [ -s "$CORE_INSTALL_LOG" ]; then
+    echo -e "\n${CYAN}最近安装日志：${NC}"
+    tail -n 25 "$CORE_INSTALL_LOG" | sed 's/^/  /'
+    echo -e "\n${YELLOW}完整日志：${CORE_INSTALL_LOG}${NC}"
+  fi
+}
+
+ensure_xray_core() {
+  command -v xray >/dev/null 2>&1 && return 0
+  echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"
+  : > "$CORE_INSTALL_LOG" 2>/dev/null || true
+  if _run_remote_bash "$XRAY_INSTALL_SCRIPT_URL" install > "$CORE_INSTALL_LOG" 2>&1; then
+    hash -r
+    command -v xray >/dev/null 2>&1 && return 0
+    echo "xray command not found after installer completed." >> "$CORE_INSTALL_LOG"
+  fi
+  _print_core_install_failure "Xray"
+  return 1
+}
+
+ensure_singbox_core() {
+  command -v sing-box >/dev/null 2>&1 && return 0
+  echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"
+  : > "$CORE_INSTALL_LOG" 2>/dev/null || true
+  if _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > "$CORE_INSTALL_LOG" 2>&1; then
+    hash -r
+    command -v sing-box >/dev/null 2>&1 && return 0
+    echo "sing-box command not found after installer completed." >> "$CORE_INSTALL_LOG"
+  fi
+  _print_core_install_failure "Sing-box"
+  return 1
 }
 
 _run_remote_shell_with_env() {
@@ -3851,15 +3891,14 @@ if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then
 fi
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "
-${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_xray_core || { pause_for_enter; return; }
 KEYS=$(xray x25519)
 PRI=$(echo "$KEYS" | awk -F': ' '/PrivateKey/{print $2}')
 PUB=$(echo "$KEYS" | awk -F': ' '/Password|PublicKey/{print $2}' | head -n1)
 NEW_INBOUND='{"listen":"0.0.0.0","port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":"'$SNI_DOMAIN':443","serverNames":["'$SNI_DOMAIN'"],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_singbox_core || { pause_for_enter; return; }
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
@@ -3928,7 +3967,7 @@ if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
 fi
 
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心...${NC}"; _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败。${NC}"; pause_for_enter; return; }; fi
+ensure_singbox_core || { pause_for_enter; return; }
 
 PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
 NEW_INBOUND='{"type":"anytls","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
@@ -4308,11 +4347,11 @@ acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return;
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_xray_core || { pause_for_enter; return; }
 NEW_INBOUND='{"port":'$WS_PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'"}],"decryption":"none"},"streamSettings":{"network":"ws","security":"tls","tlsSettings":{"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"wsSettings":{"path":"'$WSPATH'"}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
@@ -4378,11 +4417,11 @@ LINK_IP="$SERVER_IP"
 if [ "$SERVER_IPV4" == "未分配" ] && [ "$SERVER_IPV6" != "未分配" ]; then LINK_IP="[${SERVER_IPV6}]"; fi
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "\n${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_xray_core || { pause_for_enter; return; }
 NEW_INBOUND='{"listen":"0.0.0.0","port":'$SS_PORT',"protocol":"shadowsocks","settings":{"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'","level":0,"email":"vpsbox@ss"}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "\n${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"network":"tcp,udp","method":"'$SS_METHOD'","password":"'$SS_PASS'"}'
 fi
 
@@ -4528,13 +4567,11 @@ acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return;
 HY2_PASS=$(openssl rand -hex 8)
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
-if ! command -v xray &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Xray 核心，请耐心等待...${NC}"; _run_remote_bash https://github.com/XTLS/Xray-install/raw/main/install-release.sh install > /dev/null 2>&1; hash -r; command -v xray &>/dev/null || { echo -e "
-${RED}[错误] Xray 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_xray_core || { pause_for_enter; return; }
 NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","level":0,"email":"vpsbox@hy2"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"serverName":"'$DOMAIN'","alpn":["h3"],"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2}}}'
 else
 CORE_NAME="Sing-box"
-if ! command -v sing-box &> /dev/null; then echo -e "${YELLOW}   首次部署需下载 Sing-box 核心，请耐心等待...${NC}"; _run_remote_bash "$SINGBOX_INSTALL_SCRIPT_URL" > /dev/null 2>&1; hash -r; command -v sing-box &>/dev/null || { echo -e "
-${RED}[错误] Sing-box 核心下载失败，请检查网络连接。${NC}"; pause_for_enter; return; }; fi
+ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
