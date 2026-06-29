@@ -1362,6 +1362,142 @@ esac
 done
 }
 
+_dns_collect_current() {
+  local dns_lines
+  if _svc_is_active systemd-resolved >/dev/null 2>&1 && command -v resolvectl >/dev/null 2>&1; then
+    dns_lines=$(resolvectl dns 2>/dev/null | awk '
+      /^Global:/ { for (i=2; i<=NF; i++) print "nameserver " $i }
+    ')
+    if [ -z "$dns_lines" ]; then
+      dns_lines=$(resolvectl status 2>/dev/null | awk '
+        /DNS Servers:/ {
+          sub(/^.*DNS Servers:[[:space:]]*/, "nameserver ")
+          print
+          exit
+        }
+      ')
+    fi
+  fi
+  [ -z "$dns_lines" ] && dns_lines=$(grep '^nameserver' /etc/resolv.conf 2>/dev/null)
+  printf '%s\n' "$dns_lines" | awk 'NF && !seen[$0]++'
+}
+
+_dns_print_lines() {
+  local color="$1" dns_lines line
+  dns_lines=$(_dns_collect_current)
+  if [ -z "$dns_lines" ]; then
+    echo -e "  ${YELLOW}(未检测到 nameserver)${NC}"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] && echo -e "  ${color}${line}${NC}"
+  done <<< "$dns_lines"
+}
+
+_dns_menu_row() {
+  local no="$1" title="$2" desc="$3"
+  local title_width pad target_width=12
+  title_width=$(_display_width "$title")
+  pad=$(( target_width - title_width ))
+  [ "$pad" -lt 1 ] && pad=1
+  printf "  ${GREEN}%s${NC}. %s%*s%s\n" "$no" "$title" "$pad" "" "$desc"
+}
+
+_dns_menu_sub() {
+  printf "%17s%s\n" "" "$1"
+}
+
+_dns_apply() {
+  local d1v4="$1" d2v4="$2" d1v6="$3" d2v6="$4"
+  local has_v4 has_v6 resolv_tmp server link link_failed
+  local dns_servers=()
+
+  has_v4=$(ip -4 addr show scope global 2>/dev/null | grep -c 'inet ')
+  has_v6=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6 ')
+
+  if [ "$has_v4" -gt 0 ] || [ -z "$d1v6" ]; then
+    [ -n "$d1v4" ] && dns_servers+=("$d1v4")
+    [ -n "$d2v4" ] && [ "$d2v4" != "$d1v4" ] && dns_servers+=("$d2v4")
+  fi
+  if [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ]; then
+    dns_servers+=("$d1v6")
+    [ -n "$d2v6" ] && [ "$d2v6" != "$d1v6" ] && dns_servers+=("$d2v6")
+  fi
+  if [ "${#dns_servers[@]}" -eq 0 ]; then
+    [ -n "$d1v4" ] && dns_servers+=("$d1v4")
+    [ -n "$d2v4" ] && [ "$d2v4" != "$d1v4" ] && dns_servers+=("$d2v4")
+  fi
+  if [ "${#dns_servers[@]}" -eq 0 ]; then
+    echo -e "${RED}[错误] 未提供可写入的 DNS 地址。${NC}"
+    return 1
+  fi
+
+  if _svc_is_active systemd-resolved >/dev/null 2>&1; then
+    mkdir -p /etc/systemd/resolved.conf.d || { echo -e "${RED}[错误] 无法创建 systemd-resolved 配置目录。${NC}"; return 1; }
+    {
+      printf '[Resolve]\n'
+      printf 'DNS=%s\n' "${dns_servers[*]}"
+      printf 'FallbackDNS=%s\n' "${dns_servers[*]}"
+      printf 'Domains=~.\n'
+    } > /etc/systemd/resolved.conf.d/vpsbox-dns.conf || {
+      echo -e "${RED}[错误] 写入 systemd-resolved DNS 配置失败。${NC}"
+      return 1
+    }
+
+    if ! _svc_restart systemd-resolved >/dev/null 2>&1; then
+      echo -e "${RED}[错误] DNS 配置已写入，但 systemd-resolved 重启失败。${NC}"
+      echo -e "${YELLOW}[提示] 请检查: systemctl status systemd-resolved${NC}"
+      return 1
+    fi
+
+    link_failed=0
+    if command -v resolvectl >/dev/null 2>&1; then
+      for link in $(ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$'); do
+        resolvectl dns "$link" "${dns_servers[@]}" 2>/dev/null || link_failed=1
+      done
+    fi
+
+    echo -e "${GREEN}[成功] DNS 已写入 systemd-resolved 并重启。${NC}"
+    if [ "$link_failed" -eq 1 ]; then
+      echo -e "${YELLOW}[提示] 全局 DNS 已生效；部分链路的即时覆盖失败，后续可手动检查 resolvectl status。${NC}"
+    else
+      echo -e "${YELLOW}[提示] 已写入全局配置，并覆盖当前活跃链路。${NC}"
+    fi
+  else
+    resolv_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时 DNS 文件。${NC}"; return 1; }
+    for server in "${dns_servers[@]}"; do
+      echo "nameserver $server" >> "$resolv_tmp"
+    done
+
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    if [ -L /etc/resolv.conf ]; then
+      rm -f /etc/resolv.conf || {
+        rm -f "$resolv_tmp"
+        echo -e "${RED}[错误] 无法替换 /etc/resolv.conf 符号链接。${NC}"
+        return 1
+      }
+    fi
+    if ! cat "$resolv_tmp" > /etc/resolv.conf; then
+      rm -f "$resolv_tmp"
+      echo -e "${RED}[错误] 写入 /etc/resolv.conf 失败。${NC}"
+      return 1
+    fi
+    rm -f "$resolv_tmp"
+    chmod 644 /etc/resolv.conf 2>/dev/null || true
+
+    if chattr +i /etc/resolv.conf 2>/dev/null; then
+      echo -e "${GREEN}[成功] DNS 已写入 /etc/resolv.conf，并已启用写保护。${NC}"
+    else
+      echo -e "${GREEN}[成功] DNS 已写入 /etc/resolv.conf。${NC}"
+      echo -e "${YELLOW}[提示] 当前文件系统不支持 chattr 写保护，DHCP 或网络管理器后续仍可能覆盖。${NC}"
+    fi
+  fi
+
+  echo ""
+  echo -e "  ${CYAN}生效后的 DNS:${NC}"
+  _dns_print_lines "$GREEN"
+}
+
 optimize_dns() {
 while true; do
 clear_screen; print_divider
@@ -1369,84 +1505,27 @@ print_center "[ 系统 DNS 优化 ]" "$CYAN"
 
 echo -e "  ${CYAN}当前 DNS 配置:${NC}"
 echo "  ─────────────────────────────"
-if _svc_is_active systemd-resolved >/dev/null 2>&1; then
-  local _dns_servers; _dns_servers=$(resolvectl dns 2>/dev/null | grep -v "^Link\|^$" | awk '{for(i=2;i<=NF;i++) print "nameserver "$i}' | sort -u)
-  if [ -n "$_dns_servers" ]; then
-    echo "$_dns_servers" | while read -r line; do echo -e "  ${YELLOW}${line}${NC}"; done
-  else
-    resolvectl status 2>/dev/null | grep "DNS Servers:" | head -1 | sed 's/.*DNS Servers: /  nameserver /' | while read -r line; do echo -e "  ${YELLOW}${line}${NC}"; done
-  fi
-else
-  grep '^nameserver' /etc/resolv.conf 2>/dev/null | while read -r line; do
-    echo -e "  ${YELLOW}${line}${NC}"
-  done
-fi
+_dns_print_lines "$YELLOW"
 echo "  ─────────────────────────────"
 echo ""
-echo -e "  ${GREEN}1.${NC} 国际优化  CF 1.1.1.1 + Google 8.8.8.8"
-echo -e "             IPv6: 2606:4700:4700::1111 + 2001:4860:4860::8888"
-echo -e "  ${GREEN}2.${NC} 国内优化  阿里 223.5.5.5 + 腾讯 183.60.83.19"
-echo -e "             IPv6: 2400:3200::1 + 2400:da00::6666"
-echo -e "  ${GREEN}3.${NC} 自动检测  根据服务器所在地区自动选择最优 DNS"
-echo -e "  ${GREEN}4.${NC} 手动设置  自定义 DNS 地址"
-echo -e "  ${GREEN}5.${NC} 解锁文件  取消 resolv.conf 写保护"
-echo -e "  ${GREEN}0.${NC} 返回"
+_dns_menu_row 1 "国际优化" "CF 1.1.1.1 + Google 8.8.8.8"
+_dns_menu_sub "IPv6: 2606:4700:4700::1111 + 2001:4860:4860::8888"
+_dns_menu_row 2 "国内优化" "阿里 223.5.5.5 + 腾讯 183.60.83.19"
+_dns_menu_sub "IPv6: 2400:3200::1 + 2400:da00::6666"
+_dns_menu_row 3 "自动检测" "根据服务器所在地区自动选择 DNS"
+_dns_menu_row 4 "手动设置" "自定义 DNS 地址"
+_dns_menu_row 5 "解除写保护" "取消 /etc/resolv.conf 不可变属性"
+_dns_menu_row 0 "返回" ""
 echo ""
 read -r -p "> 请选择 [0-5]: " dns_opt
 dns_opt="${dns_opt// /}"
 
-_apply_dns() {
-  local d1v4="$1" d2v4="$2" d1v6="$3" d2v6="$4"
-  local has_v4 has_v6 resolv_tmp
-  has_v4=$(ip -4 addr show scope global 2>/dev/null | grep -c 'inet ')
-  has_v6=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6 ')
-  if _svc_is_active systemd-resolved >/dev/null 2>&1; then
-    # 1) 全局 DNS 持久化配置
-    mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/vpsbox-dns.conf << EOF
-[Resolve]
-DNS=$d1v4 $d2v4
-EOF
-    if [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ]; then
-      sed -i "/^DNS=/s/$/ $d1v6 $d2v6/" /etc/systemd/resolved.conf.d/vpsbox-dns.conf
-    fi
-    # 2) 覆盖所有活跃链路的 DHCP DNS
-    for _link in $(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo); do
-      if [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ]; then
-        resolvectl dns "$_link" "$d1v4" "$d2v4" "$d1v6" "$d2v6" 2>/dev/null
-      else
-        resolvectl dns "$_link" "$d1v4" "$d2v4" 2>/dev/null
-      fi
-    done
-    systemctl restart systemd-resolved 2>/dev/null
-    echo -e "${GREEN}[成功] DNS 已写入 systemd-resolved 并重启！${NC}"
-    echo -e "${YELLOW}[提示] 已全局锁定，DHCP 续租不会覆盖。${NC}"
-  else
-    resolv_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时 DNS 文件。${NC}"; return 1; }
-    [ "$has_v4" -gt 0 ] && { echo "nameserver $d1v4" >> "$resolv_tmp"; echo "nameserver $d2v4" >> "$resolv_tmp"; }
-    [ "$has_v6" -gt 0 ] && [ -n "$d1v6" ] && { echo "nameserver $d1v6" >> "$resolv_tmp"; echo "nameserver $d2v6" >> "$resolv_tmp"; }
-    [ -s "$resolv_tmp" ] || { echo "nameserver $d1v4" >> "$resolv_tmp"; echo "nameserver $d2v4" >> "$resolv_tmp"; }
-    chattr -i /etc/resolv.conf 2>/dev/null
-    cat "$resolv_tmp" > /etc/resolv.conf
-    rm -f "$resolv_tmp"
-    chattr +i /etc/resolv.conf 2>/dev/null
-    echo -e "${GREEN}[成功] DNS 已写入并锁定！${NC}"
-  fi
-  echo ""
-  echo -e "  ${CYAN}生效后的 DNS:${NC}"
-  if _svc_is_active systemd-resolved >/dev/null 2>&1; then
-    resolvectl dns 2>/dev/null | grep -v "^Link\|^$" | awk '{for(i=2;i<=NF;i++) print "nameserver "$i}' | sort -u | while read -r line; do echo -e "  ${GREEN}${line}${NC}"; done
-  else
-    grep '^nameserver' /etc/resolv.conf | while read -r line; do echo -e "  ${GREEN}${line}${NC}"; done
-  fi
-}
-
 case $dns_opt in
 1)
-  _apply_dns "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"
+  _dns_apply "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"
   pause_for_enter ;;
 2)
-  _apply_dns "223.5.5.5" "183.60.83.19" "2400:3200::1" "2400:da00::6666"
+  _dns_apply "223.5.5.5" "183.60.83.19" "2400:3200::1" "2400:da00::6666"
   pause_for_enter ;;
 3)
   echo -e "\n${CYAN}>>> 正在检测服务器所在地区...${NC}"
@@ -1454,10 +1533,10 @@ case $dns_opt in
   echo -e "  地区代码: ${YELLOW}${_country:-未知}${NC}"
   if [ "$_country" = "CN" ]; then
     echo -e "  → 选用国内 DNS（阿里/腾讯）"
-    _apply_dns "223.5.5.5" "183.60.83.19" "2400:3200::1" "2400:da00::6666"
+    _dns_apply "223.5.5.5" "183.60.83.19" "2400:3200::1" "2400:da00::6666"
   else
     echo -e "  → 选用国际 DNS（CF/Google）"
-    _apply_dns "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"
+    _dns_apply "1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888"
   fi
   pause_for_enter ;;
 4)
@@ -1466,10 +1545,14 @@ case $dns_opt in
   read -r -p "> 请输入备 DNS (IPv4，可留空): " _d2
   [ -z "$_d1" ] && continue
   [ -z "$_d2" ] && _d2="$_d1"
-  _apply_dns "$_d1" "$_d2" "" ""
+  _dns_apply "$_d1" "$_d2" "" ""
   pause_for_enter ;;
 5)
-  chattr -i /etc/resolv.conf 2>/dev/null && echo -e "${GREEN}[成功] 已解除写保护，可自由编辑 /etc/resolv.conf${NC}" || echo -e "${YELLOW}[提示] 文件未被锁定。${NC}"
+  if chattr -i /etc/resolv.conf 2>/dev/null; then
+    echo -e "${GREEN}[成功] 已解除 /etc/resolv.conf 写保护，可自由编辑。${NC}"
+  else
+    echo -e "${YELLOW}[提示] 当前 /etc/resolv.conf 不是可 chattr 的普通文件，或文件系统不支持写保护。${NC}"
+  fi
   pause_for_enter ;;
 0) return ;;
 *) echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
