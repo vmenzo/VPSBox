@@ -5321,8 +5321,8 @@ ai_tools_status() {
   echo -e "  ${CYAN}Codex Provider:${NC} ${codex_provider:-默认}"
   echo -e "  ${CYAN}Codex 中转:${NC} ${codex_base:-未配置}"
   echo -e "  ${CYAN}Claude 中转:${NC} ${claude_base:-未配置}"
-  echo -e "  ${CYAN}Codex API Key:${NC} $([ -n "$(_codex_env_value OPENAI_API_KEY)" ] && echo 已配置 || echo 未配置)"
-  echo -e "  ${CYAN}Claude API Key:${NC} $([ -n "$(_claude_env_value ANTHROPIC_API_KEY)" ] && echo 已配置 || echo 未配置)"
+  echo -e "  ${CYAN}Codex API Key:${NC} $(_codex_key_configured && echo 已配置 || echo 未配置)"
+  echo -e "  ${CYAN}Claude API Key:${NC} $(_claude_key_configured && echo 已配置 || echo 未配置)"
   echo ""
   echo -e "  ${YELLOW}认证说明:${NC}"
   echo -e "  - Codex CLI 安装后运行 ${GREEN}codex login${NC} 登录"
@@ -5354,21 +5354,21 @@ install_codex_cli() {
 
 install_claude_code() {
   clear_screen; print_divider
-  print_center "[ 安装 / 更新 Claude Code ]" "$CYAN"
+  print_center "[ 安装 Claude Code ]" "$CYAN"
   echo -e "  ${CYAN}官方安装脚本:${NC} ${CLAUDE_CODE_INSTALL_SCRIPT_URL}"
   echo ""
-  if ! confirm_action "安装或更新 Claude Code"; then pause_for_enter; return; fi
+  if ! confirm_action "安装 Claude Code"; then pause_for_enter; return; fi
   echo -e "\n${CYAN}>>> 正在运行 Claude Code 官方安装器...${NC}"
   if _run_remote_shell_with_env bash "$CLAUDE_CODE_INSTALL_SCRIPT_URL"; then
     if _ai_cmd_path claude >/dev/null 2>&1; then
-      echo -e "\n${GREEN}[成功] Claude Code 已安装 / 更新。${NC}"
+      echo -e "\n${GREEN}[成功] Claude Code 已安装。${NC}"
       _ai_version_line "Claude Code" "claude"
       echo -e "  ${YELLOW}首次使用请运行:${NC} claude"
     else
       echo -e "\n${YELLOW}[警告] 安装器已完成，但未检测到 claude。请重新打开终端或检查 ~/.local/bin。${NC}"
     fi
   else
-    echo -e "\n${RED}[错误] Claude Code 安装 / 更新失败。${NC}"
+    echo -e "\n${RED}[错误] Claude Code 安装失败。${NC}"
   fi
   pause_for_enter
 }
@@ -5401,12 +5401,22 @@ _escape_json_string() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+_shell_single_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
+
 _codex_config_file() {
   echo "${CODEX_HOME:-${HOME}/.codex}/config.toml"
 }
 
 _codex_env_file() {
   echo "${CODEX_HOME:-${HOME}/.codex}/vpsbox.env"
+}
+
+_codex_auth_file() {
+  echo "${CODEX_HOME:-${HOME}/.codex}/auth.json"
 }
 
 _codex_config_value() {
@@ -5430,7 +5440,40 @@ _codex_env_value() {
   local key="$1" file
   file=$(_codex_env_file)
   [ -f "$file" ] || return 0
-  awk -F= -v key="$key" '$1 == key {print substr($0, length(key)+2); exit}' "$file"
+  awk -F= -v key="$key" '
+    {
+      lhs=$1
+      sub(/^[[:space:]]*export[[:space:]]+/, "", lhs)
+      gsub(/[[:space:]]/, "", lhs)
+      if (lhs == key) {
+        val=substr($0, index($0, "=")+1)
+        sub(/^[[:space:]]*/, "", val)
+        sub(/[[:space:]]*$/, "", val)
+        gsub(/^"/, "", val)
+        gsub(/"$/, "", val)
+        gsub(/^'\''/, "", val)
+        gsub(/'\''$/, "", val)
+        print val
+        exit
+      }
+    }
+  ' "$file"
+}
+
+_codex_auth_key_configured() {
+  local file
+  file=$(_codex_auth_file)
+  [ -f "$file" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    jq -e '(.OPENAI_API_KEY // "") != ""' "$file" >/dev/null 2>&1
+  else
+    grep -q '"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*"[^"]' "$file" 2>/dev/null
+  fi
+}
+
+_codex_key_configured() {
+  [ -n "$(_codex_env_value OPENAI_API_KEY)" ] && return 0
+  _codex_auth_key_configured
 }
 
 _codex_provider_config_value() {
@@ -5495,23 +5538,97 @@ _append_codex_provider_block() {
     printf 'name = "VPSBox API Proxy"\n'
     printf 'base_url = "%s"\n' "$escaped"
     printf 'wire_api = "responses"\n'
-    printf 'env_key = "OPENAI_API_KEY"\n'
+    printf 'requires_openai_auth = true\n'
   } >> "$file"
 }
 
 _set_codex_env_key() {
-  local key="$1" value="$2" file tmp
+  local key="$1" value="$2" file tmp quoted line
   file=$(_codex_env_file)
   mkdir -p "$(dirname "$file")"
   touch "$file"
   chmod 600 "$file" 2>/dev/null || true
   tmp=$(mktemp) || return 1
-  awk -F= -v key="$key" -v value="$value" '
+  quoted=$(_shell_single_quote "$value")
+  line="export ${key}=${quoted}"
+  awk -F= -v key="$key" -v line="$line" '
     BEGIN { done=0 }
-    $1 == key { print key "=" value; done=1; next }
+    {
+      lhs=$1
+      sub(/^[[:space:]]*export[[:space:]]+/, "", lhs)
+      gsub(/[[:space:]]/, "", lhs)
+      if (lhs == key) { print line; done=1; next }
+    }
     { print }
-    END { if (!done) print key "=" value }
+    END { if (!done) print line }
   ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+_set_codex_auth_api_key_without_jq() {
+  local value="$1" file tmp escaped
+  file=$(_codex_auth_file)
+  tmp=$(mktemp) || return 1
+  escaped=$(_escape_json_string "$value")
+  if [ ! -s "$file" ]; then
+    {
+      printf '{\n'
+      printf '  "OPENAI_API_KEY": "%s"\n' "$escaped"
+      printf '}\n'
+    } > "$tmp" && mv "$tmp" "$file"
+    return $?
+  fi
+  if grep -q '"OPENAI_API_KEY"[[:space:]]*:' "$file" 2>/dev/null; then
+    sed -E 's|^([[:space:]]*"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*")[^"]*(".*)$|\1'"$escaped"'\2|' "$file" > "$tmp" && mv "$tmp" "$file"
+    return $?
+  fi
+  awk -v value="$escaped" '
+    function flush() {
+      if (buf != "") {
+        print buf
+        buf=""
+      }
+    }
+    BEGIN { added=0; buf="" }
+    /^[[:space:]]*}[[:space:]]*$/ && !added {
+      if (buf != "") {
+        if (buf !~ /^[[:space:]]*{[[:space:]]*$/ && buf !~ /,[[:space:]]*$/) {
+          buf=buf ","
+        }
+        print buf
+        buf=""
+      }
+      print "  \"OPENAI_API_KEY\": \"" value "\""
+      added=1
+      print
+      next
+    }
+    { flush(); buf=$0 }
+    END { flush() }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+_set_codex_auth_api_key() {
+  local value="$1" file tmp
+  file=$(_codex_auth_file)
+  mkdir -p "$(dirname "$file")"
+  tmp=$(mktemp) || return 1
+  if [ -s "$file" ] && command -v jq >/dev/null 2>&1; then
+    jq --arg value "$value" '.OPENAI_API_KEY = $value' "$file" > "$tmp" && mv "$tmp" "$file"
+  else
+    rm -f "$tmp"
+    _set_codex_auth_api_key_without_jq "$value"
+  fi
+  chmod 600 "$file" 2>/dev/null || true
+}
+
+_load_codex_env_file() {
+  local env_file
+  env_file=$(_codex_env_file)
+  [ -f "$env_file" ] || return 0
+  set -a
+  # shellcheck disable=SC1090
+  . "$env_file"
+  set +a
 }
 
 _ensure_source_line() {
@@ -5531,24 +5648,68 @@ _set_claude_env_key() {
   mkdir -p "$(dirname "$file")"
   escaped=$(_escape_json_string "$value")
   tmp=$(mktemp) || return 1
-  if [ -s "$file" ] && command -v jq >/dev/null 2>&1; then
-    jq --arg key "$key" --arg value "$value" '.env = (.env // {}) | .env[$key] = $value' "$file" > "$tmp" && mv "$tmp" "$file"
+  if command -v jq >/dev/null 2>&1; then
+    if [ -s "$file" ] && ! jq empty "$file" >/dev/null 2>&1; then
+      rm -f "$tmp"
+      echo -e "${RED}[错误] ${file} 不是有效 JSON，无法安全合并。${NC}"
+      return 1
+    fi
+    if [ -s "$file" ]; then
+      jq --arg key "$key" --arg value "$value" '.env = (.env // {}) | .env[$key] = $value' "$file" > "$tmp" && mv "$tmp" "$file"
+    else
+      jq -n --arg key "$key" --arg value "$value" '{env: {($key): $value}}' > "$tmp" && mv "$tmp" "$file"
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" "$key" "$value" <<'PY' > "$tmp" && mv "$tmp" "$file"
+import json
+import os
+import sys
+
+path, key, value = sys.argv[1], sys.argv[2], sys.argv[3]
+data = {}
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+if not isinstance(data, dict):
+    data = {}
+env = data.get("env")
+if not isinstance(env, dict):
+    env = {}
+data["env"] = env
+env[key] = value
+json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
+sys.stdout.write("\n")
+PY
   elif [ -s "$file" ]; then
     rm -f "$tmp"
-    echo -e "${RED}[错误] 已存在 ${file}，但系统缺少 jq，无法安全合并 JSON。${NC}"
+    echo -e "${RED}[错误] 已存在 ${file}，但系统缺少 jq/python3，无法安全合并 JSON。${NC}"
     echo -e "${YELLOW}请先安装 jq，或手动在 settings.json 的 env 字段中加入 ${key}。${NC}"
     return 1
   else
-    cat > "$file" <<EOF
-{
-  "env": {
-    "${key}": "${escaped}"
-  }
-}
-EOF
+    {
+      printf '{\n'
+      printf '  "env": {\n'
+      printf '    "%s": "%s"\n' "$key" "$escaped"
+      printf '  }\n'
+      printf '}\n'
+    } > "$file"
     rm -f "$tmp"
   fi
   chmod 600 "$file" 2>/dev/null || true
+}
+
+_claude_key_configured() {
+  [ -n "$(_claude_env_value ANTHROPIC_API_KEY)" ] && return 0
+  [ -n "$(_claude_env_value ANTHROPIC_AUTH_TOKEN)" ] && return 0
+  return 1
+}
+
+_load_claude_settings_env() {
+  local key value
+  for key in ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; do
+    value=$(_claude_env_value "$key")
+    [ -n "$value" ] && export "$key=$value"
+  done
 }
 
 _claude_env_value() {
@@ -5582,12 +5743,16 @@ configure_codex_proxy() {
   _set_codex_config_key model_provider "vpsbox_proxy" || { echo -e "${RED}[错误] 写入 Codex 配置失败。${NC}"; pause_for_enter; return; }
   _remove_codex_provider_block vpsbox_proxy || { echo -e "${RED}[错误] 更新 Codex Provider 失败。${NC}"; pause_for_enter; return; }
   _append_codex_provider_block vpsbox_proxy "$base_url"
-  [ -n "$api_key" ] && _set_codex_env_key OPENAI_API_KEY "$api_key"
+  if [ -n "$api_key" ]; then
+    _set_codex_env_key OPENAI_API_KEY "$api_key" || { echo -e "${RED}[错误] 写入 Codex 环境变量失败。${NC}"; pause_for_enter; return; }
+    _set_codex_auth_api_key "$api_key" || { echo -e "${RED}[错误] 写入 Codex auth.json 失败。${NC}"; pause_for_enter; return; }
+    _load_codex_env_file
+  fi
   _ensure_source_line "${HOME}/.bashrc" "$(_codex_env_file)"
   _ensure_source_line "${HOME}/.profile" "$(_codex_env_file)"
   echo -e "\n${GREEN}[完成] Codex 中转配置已写入。${NC}"
-  echo -e "${YELLOW}说明: 已创建 vpsbox_proxy provider，并将 OPENAI_API_KEY 写入 $(_codex_env_file)。${NC}"
-  echo -e "${YELLOW}重新登录终端后环境变量会自动加载；当前会话可手动执行: source $(_codex_env_file)${NC}"
+  echo -e "${YELLOW}说明: 已创建 vpsbox_proxy provider，并将 OPENAI_API_KEY 写入 $(_codex_env_file) 和 $(_codex_auth_file)。${NC}"
+  echo -e "${YELLOW}新终端会自动加载环境变量；Codex 也可直接从 auth.json 读取 API Key。${NC}"
   pause_for_enter
 }
 
@@ -5605,9 +5770,13 @@ configure_claude_proxy() {
   [ -z "$base_url" ] && { echo -e "${RED}[错误] Base URL 不能为空。${NC}"; pause_for_enter; return; }
   read -r -s -p "> API Key（不会显示，可留空只配置地址）: " api_key; echo ""
   _set_claude_env_key ANTHROPIC_BASE_URL "$base_url" || { echo -e "${RED}[错误] 写入 Claude 配置失败。${NC}"; pause_for_enter; return; }
-  [ -n "$api_key" ] && _set_claude_env_key ANTHROPIC_API_KEY "$api_key"
+  if [ -n "$api_key" ]; then
+    _set_claude_env_key ANTHROPIC_API_KEY "$api_key" || { echo -e "${RED}[错误] 写入 Claude API Key 失败。${NC}"; pause_for_enter; return; }
+    _set_claude_env_key ANTHROPIC_AUTH_TOKEN "$api_key" || { echo -e "${RED}[错误] 写入 Claude Auth Token 失败。${NC}"; pause_for_enter; return; }
+    _load_claude_settings_env
+  fi
   echo -e "\n${GREEN}[完成] Claude Code 中转配置已写入。${NC}"
-  echo -e "${YELLOW}说明: 配置写入 ~/.claude/settings.json 的 env 字段，仅影响 Claude Code 会话环境。${NC}"
+  echo -e "${YELLOW}说明: 已写入 ~/.claude/settings.json 的 env 字段，包含 ANTHROPIC_BASE_URL、ANTHROPIC_API_KEY 和 ANTHROPIC_AUTH_TOKEN。${NC}"
   pause_for_enter
 }
 
@@ -5620,6 +5789,10 @@ run_ai_doctor() {
     pause_for_enter
     return
   fi
+  case "$cmd" in
+    codex) _load_codex_env_file ;;
+    claude) _load_claude_settings_env ;;
+  esac
   if "$path" doctor; then
     echo -e "\n${GREEN}[完成] 诊断命令已执行。${NC}"
   else
@@ -5635,7 +5808,7 @@ _ai_version_line "Codex CLI" "codex"
 _ai_version_line "Claude Code" "claude"
 echo ""
 echo -e "  ${CYAN}安装与维护${NC}"
-menu_pair 1 "安装/更新 Codex CLI" 2 "安装/更新 Claude Code"
+menu_pair 1 "安装/更新 Codex CLI" 2 "安装 Claude Code"
 menu_pair 3 "更新 Claude Code" 4 "查看状态"
 menu_pair 5 "Codex 诊断" 6 "Claude 诊断"
 menu_pair 7 "配置 Codex 中转" 8 "配置 Claude 中转"
