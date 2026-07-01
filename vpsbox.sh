@@ -1403,13 +1403,83 @@ _dns_menu_row() {
   printf "  ${GREEN}%s${NC}. %s%*s%s\n" "$no" "$title" "$pad" "" "$desc"
 }
 
-_dns_menu_sub() {
-  printf "%17s%s\n" "" "$1"
+_dns_menu_dns_row() {
+  local no="$1" title="$2" ipv4="$3" ipv6="$4"
+  printf "  ${GREEN}%s${NC}. %s\n" "$no" "$title"
+  printf "      ${CYAN}IPv4${NC}  %s\n" "$ipv4"
+  printf "      ${CYAN}IPv6${NC}  %s\n" "$ipv6"
+}
+
+_dns_write_plain_resolv_conf() {
+  local lock="${1:-0}" resolv_tmp server
+  shift
+  _DNS_RESOLV_LOCKED=0
+
+  if [ "$#" -eq 0 ]; then
+    echo -e "${RED}[错误] 未提供可写入的 DNS 地址。${NC}"
+    return 1
+  fi
+
+  resolv_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时 DNS 文件。${NC}"; return 1; }
+  for server in "$@"; do
+    [ -n "$server" ] && echo "nameserver $server" >> "$resolv_tmp"
+  done
+  if [ ! -s "$resolv_tmp" ]; then
+    rm -f "$resolv_tmp"
+    echo -e "${RED}[错误] 未提供可写入的 DNS 地址。${NC}"
+    return 1
+  fi
+
+  chattr -i /etc/resolv.conf 2>/dev/null || true
+  if [ -L /etc/resolv.conf ]; then
+    rm -f /etc/resolv.conf || {
+      rm -f "$resolv_tmp"
+      echo -e "${RED}[错误] 无法替换 /etc/resolv.conf 符号链接。${NC}"
+      return 1
+    }
+  fi
+  if ! cat "$resolv_tmp" > /etc/resolv.conf; then
+    rm -f "$resolv_tmp"
+    echo -e "${RED}[错误] 写入 /etc/resolv.conf 失败。${NC}"
+    return 1
+  fi
+  rm -f "$resolv_tmp"
+  chmod 644 /etc/resolv.conf 2>/dev/null || true
+
+  if [ "$lock" = "1" ] && chattr +i /etc/resolv.conf 2>/dev/null; then
+    _DNS_RESOLV_LOCKED=1
+  fi
+}
+
+_dns_resolved_resolv_target() {
+  local target
+  for target in /run/systemd/resolve/resolv.conf /run/systemd/resolve/stub-resolv.conf; do
+    [ -s "$target" ] && { echo "$target"; return 0; }
+  done
+  return 1
+}
+
+_dns_resolv_conf_uses_resolved() {
+  local current
+  current=$(readlink -f /etc/resolv.conf 2>/dev/null || true)
+  case "$current" in
+    /run/systemd/resolve/resolv.conf) return 0 ;;
+  esac
+  return 1
+}
+
+_dns_ensure_resolv_conf_uses_resolved() {
+  local target
+  _dns_resolv_conf_uses_resolved && return 0
+  target=$(_dns_resolved_resolv_target) || return 1
+  chattr -i /etc/resolv.conf 2>/dev/null || true
+  rm -f /etc/resolv.conf || return 1
+  ln -s "$target" /etc/resolv.conf
 }
 
 _dns_apply() {
   local d1v4="$1" d2v4="$2" d1v6="$3" d2v6="$4"
-  local has_v4 has_v6 resolv_tmp server link link_failed
+  local has_v4 has_v6 link link_failed resolv_mode
   local dns_servers=()
 
   has_v4=$(ip -4 addr show scope global 2>/dev/null | grep -c 'inet ')
@@ -1452,40 +1522,34 @@ _dns_apply() {
 
     link_failed=0
     if command -v resolvectl >/dev/null 2>&1; then
-      for link in $(ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$'); do
+      for link in $(ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep -v '^lo$'); do
         resolvectl dns "$link" "${dns_servers[@]}" 2>/dev/null || link_failed=1
       done
     fi
 
+    resolv_mode="resolved"
+    if ! _dns_ensure_resolv_conf_uses_resolved; then
+      if ! _dns_write_plain_resolv_conf 0 "${dns_servers[@]}"; then
+        echo -e "${RED}[错误] systemd-resolved 已配置，但 /etc/resolv.conf 未能接入。${NC}"
+        return 1
+      fi
+      resolv_mode="plain"
+    fi
+
     echo -e "${GREEN}[成功] DNS 已写入 systemd-resolved 并重启。${NC}"
+    if [ "$resolv_mode" = "resolved" ]; then
+      echo -e "${YELLOW}[提示] /etc/resolv.conf 已接入 systemd-resolved 上游解析文件，系统解析会使用新 DNS。${NC}"
+    else
+      echo -e "${YELLOW}[提示] 未找到可用的 resolved 解析文件，已同步写入 /etc/resolv.conf。${NC}"
+    fi
     if [ "$link_failed" -eq 1 ]; then
-      echo -e "${YELLOW}[提示] 全局 DNS 已生效；部分链路的即时覆盖失败，后续可手动检查 resolvectl status。${NC}"
+      echo -e "${YELLOW}[提示] 部分链路的即时覆盖失败，后续可手动检查 resolvectl status。${NC}"
     else
       echo -e "${YELLOW}[提示] 已写入全局配置，并覆盖当前活跃链路。${NC}"
     fi
   else
-    resolv_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时 DNS 文件。${NC}"; return 1; }
-    for server in "${dns_servers[@]}"; do
-      echo "nameserver $server" >> "$resolv_tmp"
-    done
-
-    chattr -i /etc/resolv.conf 2>/dev/null || true
-    if [ -L /etc/resolv.conf ]; then
-      rm -f /etc/resolv.conf || {
-        rm -f "$resolv_tmp"
-        echo -e "${RED}[错误] 无法替换 /etc/resolv.conf 符号链接。${NC}"
-        return 1
-      }
-    fi
-    if ! cat "$resolv_tmp" > /etc/resolv.conf; then
-      rm -f "$resolv_tmp"
-      echo -e "${RED}[错误] 写入 /etc/resolv.conf 失败。${NC}"
-      return 1
-    fi
-    rm -f "$resolv_tmp"
-    chmod 644 /etc/resolv.conf 2>/dev/null || true
-
-    if chattr +i /etc/resolv.conf 2>/dev/null; then
+    _dns_write_plain_resolv_conf 1 "${dns_servers[@]}" || return 1
+    if [ "${_DNS_RESOLV_LOCKED:-0}" -eq 1 ]; then
       echo -e "${GREEN}[成功] DNS 已写入 /etc/resolv.conf，并已启用写保护。${NC}"
     else
       echo -e "${GREEN}[成功] DNS 已写入 /etc/resolv.conf。${NC}"
@@ -1508,10 +1572,8 @@ echo "  ────────────────────────
 _dns_print_lines "$YELLOW"
 echo "  ─────────────────────────────"
 echo ""
-_dns_menu_row 1 "国际优化" "CF 1.1.1.1 + Google 8.8.8.8"
-_dns_menu_sub "IPv6: 2606:4700:4700::1111 + 2001:4860:4860::8888"
-_dns_menu_row 2 "国内优化" "阿里 223.5.5.5 + 腾讯 183.60.83.19"
-_dns_menu_sub "IPv6: 2400:3200::1 + 2400:da00::6666"
+_dns_menu_dns_row 1 "国际优化" "CF 1.1.1.1 + Google 8.8.8.8" "CF 2606:4700:4700::1111 + Google 2001:4860:4860::8888"
+_dns_menu_dns_row 2 "国内优化" "阿里 223.5.5.5 + 腾讯 183.60.83.19" "阿里 2400:3200::1 + 百度 2400:da00::6666"
 _dns_menu_row 3 "自动检测" "根据服务器所在地区自动选择 DNS"
 _dns_menu_row 4 "手动设置" "自定义 DNS 地址"
 _dns_menu_row 5 "解除写保护" "取消 /etc/resolv.conf 不可变属性"
