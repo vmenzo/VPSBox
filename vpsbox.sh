@@ -560,11 +560,11 @@ _node_meta_upsert() {
   if jq \
       --argjson port "$target_port" \
       --arg core "$core_name" \
-      --arg label "$label" \
+      --arg node_label "$label" \
       --arg link "$link" \
       --arg file "$file_path" \
       --arg protocol "$protocol" \
-      'map(select(.port != $port)) + [{"port":$port, "core":$core, "label":$label, "link":$link, "file":$file, "protocol":$protocol}] | sort_by(.port)' \
+      'map(select(.port != $port)) + [{"port":$port, "core":$core, "label":$node_label, "link":$link, "file":$file, "protocol":$protocol}] | sort_by(.port)' \
       "$meta_file" > "$tmp"; then
     mv "$tmp" "$meta_file"
   else
