@@ -4116,7 +4116,7 @@ PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" |
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
 fi
 
-LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality-${PORT}"
+LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#Reality-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "VLESS-Reality" "vless-reality" "$LINK"; then
     _ufw_allow_if_active "$PORT" tcp
@@ -4563,7 +4563,7 @@ ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
-LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#VLESS-WS-TLS-${WS_PORT}"
+LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS-TLS-${WS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "VLESS-WS-TLS" "vless-ws-tls" "$LINK"; then
     _ufw_allow_if_active "$WS_PORT" tcp
@@ -4636,7 +4636,7 @@ NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"
 fi
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
-LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#Shadowsocks-${SS_PORT}"
+LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
     _ufw_allow_if_active "$SS_PORT" tcp
@@ -4853,7 +4853,7 @@ LINK="hysteria2://${HY2_PASS}@${HY2_LINK_HOST}:${HY2_PORT}/?sni=${HY2_SNI}&alpn=
 if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
     LINK="${LINK}&mport=${HY2_HOP_RANGE}"
 fi
-LINK="${LINK}#Hysteria2-${HY2_PORT}"
+LINK="${LINK}#HY2-${HY2_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hysteria2" "hysteria2" "$LINK"; then
     _ufw_allow_if_active "$HY2_PORT" udp
