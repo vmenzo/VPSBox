@@ -445,6 +445,25 @@ _port_is_listening() {
   esac
 }
 
+_listen_proto_for_node_protocol() {
+  case "$1" in
+    hysteria2|hysteria|hys2|Hys2) echo "udp" ;;
+    *) echo "tcp" ;;
+  esac
+}
+
+_wait_for_port_listen() {
+  local port="$1" proto="${2:-tcp}" timeout="${3:-40}" waited=0
+  while [ "$waited" -lt "$timeout" ]; do
+    if _port_is_listening "$port" "$proto"; then
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+
 _ufw_allow_if_active() {
   local port="$1" proto="$2"
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
@@ -3986,6 +4005,17 @@ local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; 
 echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
     echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC}"
+    local listen_proto
+    listen_proto=$(_listen_proto_for_node_protocol "$PROTOCOL_NAME")
+    echo -e "${YELLOW}  正在等待 ${CORE_NAME} 加载新配置并监听 ${TARGET_PORT}/${listen_proto}...${NC}"
+    if _wait_for_port_listen "$TARGET_PORT" "$listen_proto" 40; then
+        echo -e "${GREEN}  ✓ 已检测到端口 ${TARGET_PORT}/${listen_proto} 正在监听${NC}"
+    else
+        echo -e "${RED}[警告] 未检测到端口 ${TARGET_PORT}/${listen_proto} 监听。${NC}"
+        echo -e "${YELLOW}  请执行: systemctl restart $(_service_name_for_core "$CORE_NAME")${NC}"
+        echo -e "${YELLOW}  然后检查: ss -tulnp | grep ':${TARGET_PORT}'${NC}"
+        echo -e "${YELLOW}  若端口已监听但客户端仍无法连接，请检查云厂商安全组/防火墙是否放行该端口。${NC}"
+    fi
     return 0
 fi
 echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
