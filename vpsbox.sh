@@ -544,7 +544,7 @@ _node_meta_remove_port() {
   local meta_file; meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
   local tmp; tmp=$(mktemp) || return 1
-  if jq --argjson port "$target_port" 'map(select(.port != $port))' "$meta_file" > "$tmp"; then
+  if jq --argjson vpsbox_meta_port "$target_port" 'map(select(.port != $vpsbox_meta_port))' "$meta_file" > "$tmp"; then
     mv "$tmp" "$meta_file"
   else
     rm -f "$tmp"
@@ -558,16 +558,24 @@ _node_meta_upsert() {
   _ensure_node_meta_file "$meta_file"
   local tmp; tmp=$(mktemp) || return 1
   if jq \
-      --argjson port "$target_port" \
-      --arg core "$core_name" \
-      --arg node_label "$label" \
-      --arg link "$link" \
-      --arg file "$file_path" \
-      --arg protocol "$protocol" \
-      'map(select(.port != $port)) + [{"port":$port, "core":$core, "label":$node_label, "link":$link, "file":$file, "protocol":$protocol}] | sort_by(.port)' \
+      --argjson vpsbox_meta_port "$target_port" \
+      --arg vpsbox_meta_core "$core_name" \
+      --arg vpsbox_meta_label "$label" \
+      --arg vpsbox_meta_link "$link" \
+      --arg vpsbox_meta_file "$file_path" \
+      --arg vpsbox_meta_protocol "$protocol" \
+      'map(select(.port != $vpsbox_meta_port)) + [{
+        "port": $vpsbox_meta_port,
+        "core": $vpsbox_meta_core,
+        "label": $vpsbox_meta_label,
+        "link": $vpsbox_meta_link,
+        "file": $vpsbox_meta_file,
+        "protocol": $vpsbox_meta_protocol
+      }] | sort_by(.port)' \
       "$meta_file" > "$tmp"; then
     mv "$tmp" "$meta_file"
   else
+    echo -e "${RED}[错误] jq 元数据写入失败。请检查 jq 版本: $(jq --version 2>/dev/null || echo unknown)${NC}"
     rm -f "$tmp"
     return 1
   fi
@@ -851,9 +859,9 @@ remove_node_runtime() {
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
-  node_link=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
-  node_protocol=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
-  fragment_file=$(jq -r --argjson port "$port" '.[] | select(.port == $port) | .file' "$meta_file" 2>/dev/null | head -n 1)
+  node_link=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
+  node_protocol=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
+  fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .file' "$meta_file" 2>/dev/null | head -n 1)
   if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
     shopt -s nullglob
     local matches=("$node_dir/${port}-"*.json "$node_dir/${port}.json")
@@ -3985,8 +3993,8 @@ del_port="${del_port// /}"
 if [ "$del_port" == "0" ]; then return; fi
 if [ -z "$del_port" ] || ! [[ "$del_port" =~ ^[0-9]+$ ]]; then echo -e "${RED}[错误] 端口号必须是有效的纯数字！请重新输入。${NC}"; continue; fi
 local core_for_port=""
-if jq -e --argjson port "$del_port" '.[] | select(.port == $port)' "$XRAY_META_FILE" >/dev/null 2>&1; then core_for_port="Xray"; fi
-if jq -e --argjson port "$del_port" '.[] | select(.port == $port)' "$SINGBOX_META_FILE" >/dev/null 2>&1; then core_for_port="Sing-box"; fi
+if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$XRAY_META_FILE" >/dev/null 2>&1; then core_for_port="Xray"; fi
+if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$SINGBOX_META_FILE" >/dev/null 2>&1; then core_for_port="Sing-box"; fi
 if [ -z "$core_for_port" ]; then echo -e "${RED}[错误] 当前部署中未找到端口为 $del_port 的节点，请检查！${NC}"; continue; fi
 break
 done
