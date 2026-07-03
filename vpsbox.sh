@@ -4012,10 +4012,18 @@ append_inbound() {
 local NEW_INBOUND=$2; local TARGET_PORT=$3; local CORE_NAME=$4; local LABEL=$5; local PROTOCOL_NAME=$6; local LINK=$7
 echo -e "${YELLOW}[系统] 正在写入独立节点片段，完成后约 30 秒生效 ${CORE_NAME}...${NC}"
 if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL_NAME:-Node}" "$LINK" "$NEW_INBOUND"; then
-    echo -e "${GREEN}  ✓ 节点片段写入成功，新节点约 30 秒后生效${NC}"
+    echo -e "${GREEN}  ✓ 节点片段和分享记录写入成功${NC}"
+    return 0
+fi
+echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
+return 1
+}
+
+verify_node_activation() {
+    local CORE_NAME="$1" TARGET_PORT="$2" PROTOCOL_NAME="$3"
     local listen_proto
     listen_proto=$(_listen_proto_for_node_protocol "$PROTOCOL_NAME")
-    echo -e "${YELLOW}  正在等待 ${CORE_NAME} 加载新配置并监听 ${TARGET_PORT}/${listen_proto}...${NC}"
+    echo -e "${YELLOW}>>> 正在等待 ${CORE_NAME} 加载新配置并监听 ${TARGET_PORT}/${listen_proto}...${NC}"
     if _wait_for_port_listen "$TARGET_PORT" "$listen_proto" 40; then
         echo -e "${GREEN}  ✓ 已检测到端口 ${TARGET_PORT}/${listen_proto} 正在监听${NC}"
     else
@@ -4024,10 +4032,6 @@ if persist_node_runtime "$CORE_NAME" "$TARGET_PORT" "${LABEL:-Node}" "${PROTOCOL
         echo -e "${YELLOW}  然后检查: ss -tulnp | grep ':${TARGET_PORT}'${NC}"
         echo -e "${YELLOW}  若端口已监听但客户端仍无法连接，请检查云厂商安全组/防火墙是否放行该端口。${NC}"
     fi
-    return 0
-fi
-echo -e "${RED}[错误] 节点片段写入或延迟重启安排失败，已取消本次变更。${NC}"
-return 1
 }
 
 select_core() {
@@ -4089,7 +4093,7 @@ sni_choice="${sni_choice// /}"
 if [ "$sni_choice" == "0" ]; then return; fi
 if [[ -z "$sni_choice" || "$sni_choice" == "1" ]]; then SNI_DOMAIN="gateway.icloud.com"; elif [[ "$sni_choice" == "2" ]]; then SNI_DOMAIN="www.microsoft.com"; else SNI_DOMAIN="$sni_choice"; fi
 if ! _valid_domain_name "$SNI_DOMAIN"; then echo -e "${RED}[错误] SNI 域名格式无效。${NC}"; pause_for_enter; return; fi
-if ! confirm_action "开始部署 Reality 节点"; then pause_for_enter; return; fi
+if ! confirm_action "开始部署 VLESS-Reality 节点"; then pause_for_enter; return; fi
 install_dependencies
 UUID=$(cat /proc/sys/kernel/random/uuid); SHORT_ID=$(openssl rand -hex 8)
 LINK_IP="$SERVER_IP"
@@ -4112,12 +4116,13 @@ PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" |
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
 fi
 
-LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#R"
+LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#VLESS-Reality-${PORT}"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "Reality" "vless-reality" "$LINK"; then
+if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "VLESS-Reality" "vless-reality" "$LINK"; then
     _ufw_allow_if_active "$PORT" tcp
-    output_node_result "$LINK" "Reality" "$PORT" "$CORE_NAME" "vless-reality"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。旧连接不会因新增节点在部署中途被重启。${NC}"
+    output_node_result "$LINK" "VLESS-Reality" "$PORT" "$CORE_NAME" "vless-reality"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。旧连接不会因新增节点在部署中途被重启。${NC}"
+    verify_node_activation "$CORE_NAME" "$PORT" "vless-reality"
 else
     echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合要求，未修改任何文件。${NC}"
 fi
@@ -4179,7 +4184,8 @@ LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
     _ufw_allow_if_active "$PORT" tcp
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
+    verify_node_activation "$CORE_NAME" "$PORT" "anytls"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4557,12 +4563,13 @@ ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
-LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS"
+LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#VLESS-WS-TLS-${WS_PORT}"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "WS-TLS" "vless-ws-tls" "$LINK"; then
+if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "VLESS-WS-TLS" "vless-ws-tls" "$LINK"; then
     _ufw_allow_if_active "$WS_PORT" tcp
-    output_node_result "$LINK" "WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
+    output_node_result "$LINK" "VLESS-WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
+    verify_node_activation "$CORE_NAME" "$WS_PORT" "vless-ws-tls"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4629,14 +4636,15 @@ NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"
 fi
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
-LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
+LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#Shadowsocks-${SS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
     _ufw_allow_if_active "$SS_PORT" tcp
     _ufw_allow_if_active "$SS_PORT" udp
     output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
-    echo -e "\n${GREEN}>>> Shadowsocks 节点已生成，新节点约 30 秒后生效。${NC}"
+    echo -e "\n${GREEN}>>> Shadowsocks 节点已生成。${NC}"
     echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
+    verify_node_activation "$CORE_NAME" "$SS_PORT" "shadowsocks"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4845,9 +4853,9 @@ LINK="hysteria2://${HY2_PASS}@${HY2_LINK_HOST}:${HY2_PORT}/?sni=${HY2_SNI}&alpn=
 if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
     LINK="${LINK}&mport=${HY2_HOP_RANGE}"
 fi
-LINK="${LINK}#H2"
+LINK="${LINK}#Hysteria2-${HY2_PORT}"
 
-if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hys2" "hysteria2" "$LINK"; then
+if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hysteria2" "hysteria2" "$LINK"; then
     _ufw_allow_if_active "$HY2_PORT" udp
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         if ! _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"; then
@@ -4857,11 +4865,12 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_P
             return
         fi
     fi
-    output_node_result "$LINK" "Hys2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
-    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入，新节点约 30 秒后生效。${NC}"
+    output_node_result "$LINK" "Hysteria2" "$HY2_PORT" "$CORE_NAME" "hysteria2"
+    echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         echo -e "${YELLOW}>>> 端口跳跃范围: ${HY2_HOP_RANGE}/udp，请在云厂商安全组放行该 UDP 范围。${NC}"
     fi
+    verify_node_activation "$CORE_NAME" "$HY2_PORT" "hysteria2"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
