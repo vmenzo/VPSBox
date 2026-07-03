@@ -545,7 +545,7 @@ _node_meta_upsert() {
       --arg link "$link" \
       --arg file "$file_path" \
       --arg protocol "$protocol" \
-      'map(select(.port != $port)) + [{port:$port, core:$core, label:$label, link:$link, file:$file, protocol:$protocol}] | sort_by(.port)' \
+      'map(select(.port != $port)) + [{"port":$port, "core":$core, "label":$label, "link":$link, "file":$file, "protocol":$protocol}] | sort_by(.port)' \
       "$meta_file" > "$tmp"; then
     mv "$tmp" "$meta_file"
   else
