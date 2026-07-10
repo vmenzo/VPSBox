@@ -329,23 +329,30 @@ _restart_ssh_service_safely() {
 }
 
 _set_sshd_option() {
-  local key="$1" value="$2" file="/etc/ssh/sshd_config" backup
-  [ -f "$file" ] || { echo -e "${RED}[错误] 未找到 $file${NC}"; return 1; }
-  backup="${file}.vpsbox.bak.$(date +%Y%m%d%H%M%S)"
-  cp "$file" "$backup" 2>/dev/null || backup=""
-  if grep -qE "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+" "$file"; then
-    sed -i -E "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+.*|${key} ${value}|" "$file"
+  local key="$1" value="$2" main_file="/etc/ssh/sshd_config"
+  local dropin_dir="/etc/ssh/sshd_config.d" file tmp backup=""
+  [ -f "$main_file" ] || { echo -e "${RED}[错误] 未找到 $main_file${NC}"; return 1; }
+  if grep -qE '^[[:space:]]*Include[[:space:]]+.*/sshd_config\.d/\*\.conf' "$main_file"; then
+    mkdir -p "$dropin_dir" || return 1
+    file="$dropin_dir/00-vpsbox.conf"
   else
-    printf '
-%s %s
-' "$key" "$value" >> "$file"
+    file="$main_file"
   fi
-  _harden_sshd_dropins
+  tmp=$(mktemp) || return 1
+  [ -f "$file" ] && { backup=$(mktemp) || { rm -f "$tmp"; return 1; }; cp -p "$file" "$backup" || { rm -f "$tmp" "$backup"; return 1; }; }
+  if [ -f "$file" ]; then
+    awk -v k="$key" 'BEGIN{IGNORECASE=1} $1 != k {print}' "$file" > "$tmp"
+  fi
+  printf '%s %s\n' "$key" "$value" >> "$tmp"
+  install -m 600 "$tmp" "$file" || { rm -f "$tmp" "$backup"; return 1; }
+  rm -f "$tmp"
   if ! _sshd_config_test; then
-    [ -n "$backup" ] && cp "$backup" "$file" 2>/dev/null
+    if [ -n "$backup" ]; then cp -p "$backup" "$file"; else rm -f "$file"; fi
+    rm -f "$backup"
     echo -e "${RED}[错误] sshd 配置校验失败，已回滚更改。请检查 ${file}${NC}"
     return 1
   fi
+  rm -f "$backup"
 }
 
 _svc_reload() {
@@ -392,7 +399,7 @@ _svc_delayed_restart() {
   local systemctl_bin
   if systemctl_bin=$(_systemctl_bin); then
     if command -v systemd-run >/dev/null 2>&1; then
-      systemd-run --on-active="${delay}s" --unit="vpsbox-delayed-${service_name}-restart" "$systemctl_bin" restart "$service_name" >/dev/null 2>&1 && return 0
+      systemd-run --on-active="${delay}s" --unit="vpsbox-delayed-${service_name}-restart-$$-$(date +%s)" "$systemctl_bin" restart "$service_name" >/dev/null 2>&1 && return 0
     fi
     ( sleep "$delay"; "$systemctl_bin" restart "$service_name" >/dev/null 2>&1 ) >/dev/null 2>&1 &
     return 0
@@ -466,10 +473,21 @@ _wait_for_port_listen() {
 
 _ufw_allow_if_active() {
   local port="$1" proto="$2"
+  VPSBOX_UFW_RULE_ADDED=0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-    ufw allow "${port}/${proto}" >/dev/null 2>&1 || true
+    if ! ufw show added 2>/dev/null | grep -Fqx "ufw allow ${port}/${proto}"; then
+      ufw allow "${port}/${proto}" >/dev/null 2>&1 && VPSBOX_UFW_RULE_ADDED=1
+    fi
     ufw reload >/dev/null 2>&1 || true
   fi
+}
+
+_ufw_delete_if_added() {
+  local port="$1" proto="$2" added="${3:-0}"
+  [ "$added" = "1" ] || return 0
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw --force delete allow "${port}/${proto}" >/dev/null 2>&1 || true
+  ufw reload >/dev/null 2>&1 || true
 }
 
 _json_escape() {
@@ -595,12 +613,37 @@ _iptables_bin() {
 
 _save_iptables_if_possible() {
   if command -v netfilter-persistent >/dev/null 2>&1; then
-    netfilter-persistent save >/dev/null 2>&1 || true
+    netfilter-persistent save >/dev/null 2>&1
   elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    iptables-save > /etc/iptables/rules.v4 2>/dev/null
   elif [ -x /usr/sbin/iptables-save ] && [ -d /etc/iptables ]; then
-    /usr/sbin/iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    /usr/sbin/iptables-save > /etc/iptables/rules.v4 2>/dev/null
+  else
+    return 1
   fi
+}
+
+_iptables_persistence_available() {
+  command -v netfilter-persistent >/dev/null 2>&1 ||
+    { [ -d /etc/iptables ] && { command -v iptables-save >/dev/null 2>&1 || [ -x /usr/sbin/iptables-save ]; }; }
+}
+
+_ensure_iptables_persistence() {
+  _iptables_bin >/dev/null 2>&1 && _iptables_persistence_available && return 0
+  echo -e "${YELLOW}[系统] 正在安装 iptables 持久化组件...${NC}"
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iptables iptables-persistent >/dev/null 2>&1
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y iptables iptables-services >/dev/null 2>&1 && systemctl enable iptables >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y iptables iptables-services >/dev/null 2>&1 && systemctl enable iptables >/dev/null 2>&1 || true
+  elif command -v apk >/dev/null 2>&1; then
+    apk add iptables iptables-openrc >/dev/null 2>&1 || apk add iptables >/dev/null 2>&1
+  else
+    return 1
+  fi
+  hash -r
+  _iptables_bin >/dev/null 2>&1 && _iptables_persistence_available
 }
 
 _extract_mport_from_link() {
@@ -610,7 +653,7 @@ _extract_mport_from_link() {
 }
 
 _remove_hy2_port_hopping() {
-  local target_port="$1" link="$2" range start end ipt
+  local target_port="$1" link="$2" range start end ipt state_file ufw_added=0
   range=$(_extract_mport_from_link "$link")
   [ -n "$range" ] || return 0
   if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 0; fi
@@ -623,7 +666,11 @@ _remove_hy2_port_hopping() {
   while "$ipt" -t nat -C OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null; do
     "$ipt" -t nat -D OUTPUT -p udp -o lo --dport "${start}:${end}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || break
   done
-  _save_iptables_if_possible
+  state_file="${NODE_RUNTIME_STATE_DIR}/hy2-hop-${target_port}.conf"
+  [ -f "$state_file" ] && . "$state_file" 2>/dev/null || true
+  _ufw_delete_if_added "${start}:${end}" udp "${UFW_RANGE_ADDED:-$ufw_added}"
+  rm -f "$state_file"
+  _save_iptables_if_possible || true
   echo -e "${GREEN}  ✓ 已清理 HY2 UDP 端口跳跃规则: ${start}-${end} -> ${target_port}${NC}"
 }
 
@@ -799,7 +846,8 @@ rebuild_core_config() {
   mv "$tmp_file" "$config_file"
   chmod 644 "$config_file" 2>/dev/null || true
   if [ "$core_name" = "Xray" ]; then
-    find "$(dirname "$config_file")" -type f \( -name '*.pem' -o -name '*.crt' -o -name '*.key' \) -exec chmod 644 {} \; 2>/dev/null || true
+    find "$(dirname "$config_file")" -type f \( -name '*.crt' -o -name 'fullchain.pem' \) -exec chmod 644 {} \; 2>/dev/null || true
+    find "$(dirname "$config_file")" -type f \( -name '*.key' -o -name 'privkey.pem' \) -exec chmod 600 {} \; 2>/dev/null || true
   fi
   return 0
 }
@@ -950,9 +998,28 @@ _git_install_status() {
   return 4
 }
 
+_trusted_script_url() {
+  local url="$1" host
+  [[ "$url" == https://* ]] || return 1
+  host="${url#https://}"; host="${host%%/*}"; host="${host%%:*}"
+  case "$host" in
+    raw.githubusercontent.com|github.com|sing-box.app|chatgpt.com|claude.ai|Check.Place|check.place|gitlab.com) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_verify_sha256_if_set() {
+  local file="$1" expected="${2:-}" actual
+  [ -z "$expected" ] && return 0
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  actual=$(sha256sum "$file" | awk '{print $1}')
+  [ "$actual" = "$expected" ]
+}
+
 _run_remote_bash() {
-  local url="$1" tmp rc first_line
+  local url="$1" tmp rc first_line expected_sha256="${VPSBOX_REMOTE_SCRIPT_SHA256:-}"
   shift
+  _trusted_script_url "$url" || { echo -e "${RED}[错误] 拒绝从非 HTTPS 或未受信任主机执行脚本: $url${NC}"; return 1; }
   tmp=$(mktemp) || return 1
   if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp"; then
     rm -f "$tmp"
@@ -974,6 +1041,9 @@ _run_remote_bash() {
     rm -f "$tmp"
     echo -e "${RED}[错误] 下载内容不像可执行 shell 脚本，已拒绝执行: $url${NC}"
     return 1
+  fi
+  if ! _verify_sha256_if_set "$tmp" "$expected_sha256"; then
+    rm -f "$tmp"; echo -e "${RED}[错误] 远程脚本 SHA256 校验失败。${NC}"; return 1
   fi
   bash "$tmp" "$@"
   rc=$?
@@ -1022,6 +1092,7 @@ ensure_singbox_core() {
 _run_remote_shell_with_env() {
   local shell_bin="$1" url="$2" tmp rc first_line
   shift 2
+  _trusted_script_url "$url" || { echo -e "${RED}[错误] 拒绝从非 HTTPS 或未受信任主机执行脚本: $url${NC}"; return 1; }
   tmp=$(mktemp) || return 1
   if ! curl -fsSL --connect-timeout 10 --max-time 120 "$url" -o "$tmp"; then
     rm -f "$tmp"
@@ -1051,12 +1122,7 @@ _run_remote_shell_with_env() {
 }
 
 _harden_sshd_dropins() {
-  if [ -d /etc/ssh/sshd_config.d ] && [ -n "$(ls -A /etc/ssh/sshd_config.d/ 2>/dev/null)" ]; then
-    local f
-    for f in /etc/ssh/sshd_config.d/*.conf; do
-      [ -f "$f" ] && sed -i 's/^\(PubkeyAuthentication\|PasswordAuthentication\|PermitRootLogin\|ChallengeResponseAuthentication\) /#\0/' "$f" 2>/dev/null
-    done
-  fi
+  : # VPSBox settings live in 00-vpsbox.conf; never modify third-party drop-ins.
 }
 
 _valid_ssh_key_lines() {
@@ -1262,7 +1328,9 @@ done
 change_ssh_port() {
 clear_screen; print_divider
 print_center "[ 修改 SSH 端口 ]" "$CYAN"
-local cur_port; cur_port=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+local cur_port
+cur_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+[ -z "$cur_port" ] && cur_port=$(grep -REhi "^[[:space:]]*Port[[:space:]]+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | head -1)
 [ -z "$cur_port" ] && cur_port=22
 echo -e "  当前 SSH 端口: ${YELLOW}${cur_port}${NC}"
 echo -e "  ${CYAN}建议使用 10000-65535 范围的端口，避免与常用服务冲突。${NC}\n"
@@ -1273,16 +1341,27 @@ while true; do
   [[ "$new_port" =~ ^[0-9]+$ ]] || { echo -e "${RED}[错误] 请输入纯数字。${NC}"; continue; }
   [ "$new_port" -ne 22 ] && [ "$new_port" -le 1024 ] && { echo -e "${RED}[错误] 端口须为 22 或 1025-65534。${NC}"; continue; }
   [ "$new_port" -ge 65535 ] && { echo -e "${RED}[错误] 端口须小于 65535。${NC}"; continue; }
+  if [ "$new_port" != "$cur_port" ] && _port_is_listening "$new_port"; then
+    echo -e "${RED}[错误] 端口 ${new_port} 已被其他服务占用。${NC}"; continue
+  fi
   break
 done
 if ! confirm_action "将 SSH 端口改为 ${new_port}"; then return; fi
+local ufw_rule_added=0
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  if ufw allow "${new_port}/tcp" >/dev/null 2>&1; then ufw_rule_added=1
+  else echo -e "${RED}[错误] 无法在 UFW 放行新端口，已取消修改。${NC}"; pause_for_enter; return; fi
+fi
 _set_sshd_option Port "$new_port" || { pause_for_enter; return; }
-if _restart_ssh_service_safely "SSH 端口已更新为 ${new_port}"; then
+if (_svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1) && _wait_for_port_listen "$new_port" "tcp" 10; then
   echo -e "\n${GREEN}[成功] SSH 端口已改为 ${new_port}！${NC}"
   echo -e "  ${RED}[重要] 请立即在云服务商控制台放行端口 ${new_port}，否则下次无法连接！${NC}"
   echo -e "  ${YELLOW}[提示] 请使用新端口重新连接验证。${NC}"
 else
-  echo -e "\n${RED}[错误] SSH 服务重启失败，端口可能未生效，请手动检查。${NC}"
+  _set_sshd_option Port "$cur_port" >/dev/null 2>&1 || true
+  _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1 || true
+  [ "$ufw_rule_added" -eq 1 ] && ufw --force delete allow "${new_port}/tcp" >/dev/null 2>&1 || true
+  echo -e "\n${RED}[错误] SSH 未能在新端口监听，已恢复原端口 ${cur_port}。${NC}"
 fi
 pause_for_enter
 }
@@ -3749,7 +3828,13 @@ done
 backup_config_silently() {
 local ts
 ts=$(date +"%Y%m%d_%H%M%S")
-if sysctl -a 2>/dev/null | grep -E "net\.ipv4\.tcp_(rmem|wmem|congestion|sack)" > "${BACKUP_DIR}/backup_${ts}.conf"; then echo -e "${GREEN}[成功] 参数已自动备份。${NC}"; else echo -e "${YELLOW}[警告] 自动备份异常或不支持当前系统。${NC}"; fi
+local backup="${BACKUP_DIR}/backup_${ts}.conf"
+if sysctl -a 2>/dev/null | grep -E '^(net\.(core|ipv4|ipv6)\.)' > "$backup"; then
+  [ -f "$CUSTOM_CONF" ] && cp -p "$CUSTOM_CONF" "${backup}.managed"
+  echo -e "${GREEN}[成功] 参数及 VPSBox 配置已自动备份。${NC}"
+else
+  rm -f "$backup"; echo -e "${YELLOW}[警告] 自动备份异常或不支持当前系统。${NC}"
+fi
 }
 
 manage_backup() {
@@ -3764,7 +3849,11 @@ case $b_opt in
 if ! confirm_action "备份当前网络参数"; then continue; fi
 local ts
 ts=$(date +"%Y%m%d_%H%M%S")
-if sysctl -a 2>/dev/null | grep -E "net\.ipv4\.tcp_(rmem|wmem|congestion|sack)" > "${BACKUP_DIR}/backup_${ts}.conf"; then echo -e "\n${GREEN}[成功] TCP 参数备份成功！${NC}"; else echo -e "\n${RED}[错误] 备份执行失败。${NC}"; fi
+local backup="${BACKUP_DIR}/backup_${ts}.conf"
+if sysctl -a 2>/dev/null | grep -E '^(net\.(core|ipv4|ipv6)\.)' > "$backup"; then
+  [ -f "$CUSTOM_CONF" ] && cp -p "$CUSTOM_CONF" "${backup}.managed"
+  echo -e "\n${GREEN}[成功] 网络参数及 VPSBox 配置备份成功！${NC}"
+else rm -f "$backup"; echo -e "\n${RED}[错误] 备份执行失败。${NC}"; fi
 pause_for_enter ;;
 2)
 shopt -s nullglob; local backups=("${BACKUP_DIR}"/backup_*.conf); shopt -u nullglob
@@ -3777,7 +3866,16 @@ res_opt="${res_opt// /}"
 if [ "$res_opt" == "0" ]; then break; fi
 if [[ "$res_opt" =~ ^[0-9]+$ ]] && [ "$res_opt" -ge 1 ] && [ "$res_opt" -le "${#backups[@]}" ]; then
 if ! confirm_action "覆盖当前配置并还原至此备份" "n"; then break; fi
-if sysctl -p "${backups[$((res_opt-1))]}" > /dev/null 2>&1; then rm -f "$CUSTOM_CONF"; echo -e "\n${GREEN}[成功] 参数已成功还原！${NC}"; else echo -e "\n${RED}[错误] 还原参数失败。${NC}"; fi
+local selected="${backups[$((res_opt-1))]}" current_copy=""
+[ -f "$CUSTOM_CONF" ] && { current_copy=$(mktemp) && cp -p "$CUSTOM_CONF" "$current_copy"; }
+if sysctl -p "$selected" > /dev/null 2>&1; then
+  if [ -f "${selected}.managed" ]; then cp -p "${selected}.managed" "$CUSTOM_CONF"; else rm -f "$CUSTOM_CONF"; fi
+  echo -e "\n${GREEN}[成功] 参数及对应持久化配置已还原！${NC}"
+else
+  [ -n "$current_copy" ] && cp -p "$current_copy" "$CUSTOM_CONF"
+  echo -e "\n${RED}[错误] 还原参数失败，持久化配置未改变。${NC}"
+fi
+rm -f "$current_copy"
 pause_for_enter; break
 else
 echo -e "${RED}[错误] 输入无效编号，请重新输入！${NC}"
@@ -3795,10 +3893,10 @@ del_opt="${del_opt// /}"
 if [ "$del_opt" == "0" ]; then break; fi
 if [[ "$del_opt" =~ ^[0-9]+$ ]] && [ "$del_opt" -ge 1 ] && [ "$del_opt" -le "${#backups[@]}" ]; then
 if ! confirm_action "永久删除此备份" "n"; then break; fi
-rm -f "${backups[$((del_opt-1))]}"; echo -e "\n${GREEN}[成功] 记录已删除。${NC}"; pause_for_enter; break
+rm -f "${backups[$((del_opt-1))]}" "${backups[$((del_opt-1))]}.managed"; echo -e "\n${GREEN}[成功] 记录已删除。${NC}"; pause_for_enter; break
 elif [[ "$del_opt" == "99" ]]; then
 if ! confirm_action "永久清空所有备份" "n"; then break; fi
-rm -f "${BACKUP_DIR}"/backup_*.conf; echo -e "\n${GREEN}[成功] 已清空所有备份。${NC}"; pause_for_enter; break
+rm -f "${BACKUP_DIR}"/backup_*.conf "${BACKUP_DIR}"/backup_*.conf.managed; echo -e "\n${GREEN}[成功] 已清空所有备份。${NC}"; pause_for_enter; break
 else
 echo -e "${RED}[错误] 编号输入无效，请重新选择列表中存在的选项！${NC}"
 fi
@@ -3814,9 +3912,9 @@ clear_screen; print_divider
 print_center "[ IP 质量检测与流媒体解锁 ]" "$CYAN"
 install_dependencies
 echo -e "${CYAN}>>> 正在启动权威检测引擎...${NC}\n"
-local CHECK_TMP; CHECK_TMP=$(mktemp)
+local CHECK_TMP; CHECK_TMP=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时文件。${NC}"; pause_for_enter; return; }
 local check_ret=2
-if curl -fsSL --connect-timeout 10 --max-time 60 https://Check.Place -o "$CHECK_TMP"; then
+if _trusted_script_url "https://Check.Place" && curl -fsSL --connect-timeout 10 --max-time 60 https://Check.Place -o "$CHECK_TMP"; then
     if grep -Eq '^#!/|(^|[[:space:]])(bash|sh)[[:space:]]' "$CHECK_TMP"; then
         bash "$CHECK_TMP"
         check_ret=$?
@@ -3905,11 +4003,26 @@ if ! confirm_action "还原此备份 (当前配置将被覆盖，并尝试热重
 local sel_bk="${n_backups[$((n_res_opt-1))]}"
 local restore_notes=()
 local restore_failed=0
+local rollback_dir
+rollback_dir=$(mktemp -d) || { echo -e "${RED}[错误] 无法创建恢复暂存目录。${NC}"; pause_for_enter; continue; }
+if [ -f "$sel_bk/xray_nodes_meta.json" ] && ! jq -e 'type == "array"' "$sel_bk/xray_nodes_meta.json" >/dev/null 2>&1; then
+  echo -e "${RED}[错误] Xray 备份索引损坏，已拒绝恢复。${NC}"; rm -rf "$rollback_dir"; pause_for_enter; continue
+fi
+if [ -f "$sel_bk/singbox_nodes_meta.json" ] && ! jq -e 'type == "array"' "$sel_bk/singbox_nodes_meta.json" >/dev/null 2>&1; then
+  echo -e "${RED}[错误] Sing-box 备份索引损坏，已拒绝恢复。${NC}"; rm -rf "$rollback_dir"; pause_for_enter; continue
+fi
+[ -d "$XRAY_NODES_DIR" ] && cp -a "$XRAY_NODES_DIR" "$rollback_dir/xray_nodes.d"
+[ -d "$SINGBOX_NODES_DIR" ] && cp -a "$SINGBOX_NODES_DIR" "$rollback_dir/singbox_nodes.d"
+[ -f "$XRAY_META_FILE" ] && cp -p "$XRAY_META_FILE" "$rollback_dir/xray_nodes_meta.json"
+[ -f "$SINGBOX_META_FILE" ] && cp -p "$SINGBOX_META_FILE" "$rollback_dir/singbox_nodes_meta.json"
+[ -f "$XRAY_CONFIG_FILE" ] && cp -p "$XRAY_CONFIG_FILE" "$rollback_dir/xray_config.json"
+[ -f "$SINGBOX_CONFIG_FILE" ] && cp -p "$SINGBOX_CONFIG_FILE" "$rollback_dir/singbox_config.json"
+[ -f "$NODE_RECORD_FILE" ] && cp -p "$NODE_RECORD_FILE" "$rollback_dir/vpsbox_nodes.txt"
 if [ -d "$sel_bk/xray_nodes.d" ]; then
-  rm -rf "$XRAY_NODES_DIR" && cp -r "$sel_bk/xray_nodes.d" "$XRAY_NODES_DIR"
+  rm -rf "$XRAY_NODES_DIR" && cp -a "$sel_bk/xray_nodes.d" "$XRAY_NODES_DIR" || restore_failed=1
 fi
 if [ -d "$sel_bk/singbox_nodes.d" ]; then
-  rm -rf "$SINGBOX_NODES_DIR" && cp -r "$sel_bk/singbox_nodes.d" "$SINGBOX_NODES_DIR"
+  rm -rf "$SINGBOX_NODES_DIR" && cp -a "$sel_bk/singbox_nodes.d" "$SINGBOX_NODES_DIR" || restore_failed=1
 fi
 if [ -f "$sel_bk/xray_nodes_meta.json" ]; then
   cp "$sel_bk/xray_nodes_meta.json" "$XRAY_META_FILE"
@@ -3955,9 +4068,22 @@ if [ ${#restore_notes[@]} -gt 0 ]; then
   printf '  - %s\n' "${restore_notes[@]}"
 fi
 if [ "$restore_failed" -eq 0 ]; then
+  rm -rf "$rollback_dir"
   echo -e "\n${GREEN}[成功] 节点配置已还原，相关服务热重载成功。${NC}"; pause_for_enter
 else
-  echo -e "\n${YELLOW}[警告] 节点文件已还原，但部分核心的重建或热重载失败，请按上方结果检查。${NC}"; pause_for_enter
+  rm -rf "$XRAY_NODES_DIR" "$SINGBOX_NODES_DIR"
+  rm -f "$XRAY_META_FILE" "$SINGBOX_META_FILE" "$XRAY_CONFIG_FILE" "$SINGBOX_CONFIG_FILE" "$NODE_RECORD_FILE"
+  [ -d "$rollback_dir/xray_nodes.d" ] && cp -a "$rollback_dir/xray_nodes.d" "$XRAY_NODES_DIR"
+  [ -d "$rollback_dir/singbox_nodes.d" ] && cp -a "$rollback_dir/singbox_nodes.d" "$SINGBOX_NODES_DIR"
+  [ -f "$rollback_dir/xray_nodes_meta.json" ] && cp -p "$rollback_dir/xray_nodes_meta.json" "$XRAY_META_FILE"
+  [ -f "$rollback_dir/singbox_nodes_meta.json" ] && cp -p "$rollback_dir/singbox_nodes_meta.json" "$SINGBOX_META_FILE"
+  [ -f "$rollback_dir/xray_config.json" ] && cp -p "$rollback_dir/xray_config.json" "$XRAY_CONFIG_FILE"
+  [ -f "$rollback_dir/singbox_config.json" ] && cp -p "$rollback_dir/singbox_config.json" "$SINGBOX_CONFIG_FILE"
+  [ -f "$rollback_dir/vpsbox_nodes.txt" ] && cp -p "$rollback_dir/vpsbox_nodes.txt" "$NODE_RECORD_FILE"
+  rebuild_core_config "Xray" >/dev/null 2>&1 || true
+  rebuild_core_config "Sing-box" >/dev/null 2>&1 || true
+  rm -rf "$rollback_dir"
+  echo -e "\n${YELLOW}[警告] 恢复校验或服务应用失败，已自动回滚到恢复前状态。${NC}"; pause_for_enter
 fi
 else
 echo -e "${RED}[错误] 输入无效编号！${NC}"; sleep 1
@@ -4026,12 +4152,23 @@ verify_node_activation() {
     echo -e "${YELLOW}>>> 正在等待 ${CORE_NAME} 加载新配置并监听 ${TARGET_PORT}/${listen_proto}...${NC}"
     if _wait_for_port_listen "$TARGET_PORT" "$listen_proto" 40; then
         echo -e "${GREEN}  ✓ 已检测到端口 ${TARGET_PORT}/${listen_proto} 正在监听${NC}"
+        return 0
     else
         echo -e "${RED}[警告] 未检测到端口 ${TARGET_PORT}/${listen_proto} 监听。${NC}"
         echo -e "${YELLOW}  请执行: systemctl restart $(_service_name_for_core "$CORE_NAME")${NC}"
         echo -e "${YELLOW}  然后检查: ss -tulnp | grep ':${TARGET_PORT}'${NC}"
         echo -e "${YELLOW}  若端口已监听但客户端仍无法连接，请检查云厂商安全组/防火墙是否放行该端口。${NC}"
+        return 1
     fi
+}
+
+finalize_node_activation() {
+    local core_name="$1" port="$2" protocol="$3"
+    if verify_node_activation "$core_name" "$port" "$protocol"; then return 0; fi
+    echo -e "${RED}[错误] 节点未成功启动，正在回滚配置和分享记录。${NC}"
+    remove_node_runtime "$core_name" "$port" >/dev/null 2>&1 || true
+    [ -f "$NODE_RECORD_FILE" ] && sed -i "/端口:${port} /d" "$NODE_RECORD_FILE" 2>/dev/null
+    return 1
 }
 
 select_core() {
@@ -4122,7 +4259,7 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT"
     _ufw_allow_if_active "$PORT" tcp
     output_node_result "$LINK" "VLESS-Reality" "$PORT" "$CORE_NAME" "vless-reality"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。旧连接不会因新增节点在部署中途被重启。${NC}"
-    verify_node_activation "$CORE_NAME" "$PORT" "vless-reality"
+    finalize_node_activation "$CORE_NAME" "$PORT" "vless-reality" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败 — 生成的 JSON 不符合要求，未修改任何文件。${NC}"
 fi
@@ -4185,7 +4322,7 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT"
     _ufw_allow_if_active "$PORT" tcp
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
-    verify_node_activation "$CORE_NAME" "$PORT" "anytls"
+    finalize_node_activation "$CORE_NAME" "$PORT" "anytls" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4292,7 +4429,8 @@ acquire_cert() {
         rm -rf "$CERT_DIR"
         return 1
     fi
-    chmod 755 "$CERT_DIR"; chmod 644 "$CERT_DIR"/*.pem; chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null
+    chmod 755 "$CERT_DIR"; chmod 644 "$CERT_DIR/fullchain.pem"; chmod 600 "$CERT_DIR/privkey.pem"
+    chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null
     return 0
 }
 
@@ -4470,7 +4608,8 @@ renew_certificate() {
      /root/.acme.sh/acme.sh --install-cert -d "$domain" --ecc \
        --fullchain-file "$cert_dir/fullchain.pem" \
        --key-file "$cert_dir/privkey.pem"; then
-    chmod 755 "$cert_dir"; chmod 644 "$cert_dir"/*.pem 2>/dev/null || true
+    chmod 755 "$cert_dir"; chmod 644 "$cert_dir/fullchain.pem" 2>/dev/null || true
+    chmod 600 "$cert_dir/privkey.pem" 2>/dev/null || true
     chown -R nobody:nogroup "$cert_dir" 2>/dev/null || chown -R nobody:nobody "$cert_dir" 2>/dev/null || true
     echo -e "${GREEN}[成功] 证书已续签并安装。${NC}"
     echo -e "${YELLOW}提示：如果节点正在使用该证书，建议重启对应核心以确保加载新证书。${NC}"
@@ -4531,6 +4670,10 @@ read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT
 WS_PORT="${WS_PORT// /}"
 if [ "$WS_PORT" == "0" ]; then return; fi; [ -z "$WS_PORT" ] && WS_PORT=443
 if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65535 ]; then continue; fi
+case "$WS_PORT" in
+  443|2053|2083|2087|2096|8443) ;;
+  *) echo -e "${RED}[错误] Cloudflare HTTPS 代理不支持端口 ${WS_PORT}。请选择 443/2053/2083/2087/2096/8443。${NC}"; continue ;;
+esac
 if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
 break
 done
@@ -4569,7 +4712,7 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PO
     _ufw_allow_if_active "$WS_PORT" tcp
     output_node_result "$LINK" "VLESS-WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
-    verify_node_activation "$CORE_NAME" "$WS_PORT" "vless-ws-tls"
+    finalize_node_activation "$CORE_NAME" "$WS_PORT" "vless-ws-tls" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4636,6 +4779,7 @@ NEW_INBOUND='{"type":"shadowsocks","listen":"0.0.0.0","listen_port":'$SS_PORT',"
 fi
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
+SS_USERINFO=$(printf '%s' "$SS_USERINFO" | tr '+/' '-_' | tr -d '=')
 LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
@@ -4644,7 +4788,7 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PO
     output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
     echo -e "\n${GREEN}>>> Shadowsocks 节点已生成。${NC}"
     echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
-    verify_node_activation "$CORE_NAME" "$SS_PORT" "shadowsocks"
+    finalize_node_activation "$CORE_NAME" "$SS_PORT" "shadowsocks" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4652,12 +4796,22 @@ pause_for_enter
 }
 
 _setup_hy2_port_hopping() {
-  local target_port="$1" range="$2" start end configured=0 ipt=""
+  local target_port="$1" range="$2" start end configured=0 ipt="" conflict_port="" state_file
   if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 1; fi
   start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
   _valid_port "$start" && _valid_port "$end" && [ "$start" -le "$end" ] || return 1
   if [ "$target_port" -ge "$start" ] && [ "$target_port" -le "$end" ]; then
     echo -e "${RED}[错误] 跳跃端口范围不能包含主监听端口 ${target_port}。${NC}"
+    return 1
+  fi
+  conflict_port=$(ss -H -uln 2>/dev/null | awk -v s="$start" -v e="$end" '{n=split($5,a,":"); p=a[n]; if (p ~ /^[0-9]+$/ && p >= s && p <= e) {print p; exit}}')
+  if [ -n "$conflict_port" ]; then
+    echo -e "${RED}[错误] 跳跃范围内的 UDP 端口 ${conflict_port} 已被占用，拒绝覆盖现有服务。${NC}"
+    return 1
+  fi
+  if ! _ensure_iptables_persistence; then
+    echo -e "${RED}[错误] 未检测到 iptables 持久化组件，拒绝创建重启后会失效的跳跃规则。${NC}"
+    echo -e "${YELLOW}请先安装 iptables-persistent/netfilter-persistent。${NC}"
     return 1
   fi
 
@@ -4685,21 +4839,25 @@ _setup_hy2_port_hopping() {
     return 1
   fi
 
-  if command -v netfilter-persistent >/dev/null 2>&1; then
-    netfilter-persistent save >/dev/null 2>&1 || true
-  elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-  elif [ -x /usr/sbin/iptables-save ] && [ -d /etc/iptables ]; then
-    /usr/sbin/iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  if ! _save_iptables_if_possible; then
+    _remove_hy2_port_hopping "$target_port" "?mport=${range}" >/dev/null 2>&1 || true
+    echo -e "${RED}[错误] 跳跃规则无法持久化，已回滚。${NC}"
+    return 1
   fi
 
   _ufw_allow_if_active "$target_port" udp
+  local ufw_range_added=0
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-    ufw allow "${start}:${end}/udp" >/dev/null 2>&1 || true
+    if ! ufw show added 2>/dev/null | grep -Fqx "ufw allow ${start}:${end}/udp"; then
+      ufw allow "${start}:${end}/udp" >/dev/null 2>&1 && ufw_range_added=1
+    fi
     ufw reload >/dev/null 2>&1 || true
   fi
+  state_file="${NODE_RUNTIME_STATE_DIR}/hy2-hop-${target_port}.conf"
+  printf 'UFW_RANGE_ADDED=%s\n' "$ufw_range_added" > "$state_file"
+  chmod 600 "$state_file" 2>/dev/null || true
   echo -e "${GREEN}  ✓ HY2 UDP 端口跳跃已配置: ${start}-${end} -> ${target_port}${NC}"
-  echo -e "${YELLOW}  提示：若系统未安装持久化组件，重启后可能需要重新配置端口跳跃。${NC}"
+  echo -e "${GREEN}  ✓ 跳跃规则已写入持久化防火墙配置。${NC}"
 }
 
 _ensure_hy2_self_signed_cert() {
@@ -4712,7 +4870,8 @@ _ensure_hy2_self_signed_cert() {
   if [ -s "$CERT_DIR/fullchain.pem" ] && [ -s "$CERT_DIR/privkey.pem" ] && \
      openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -dates >/dev/null 2>&1; then
     chmod 755 "$CERT_DIR" 2>/dev/null || true
-    chmod 644 "$CERT_DIR"/*.pem 2>/dev/null || true
+    chmod 644 "$CERT_DIR/fullchain.pem" 2>/dev/null || true
+    chmod 600 "$CERT_DIR/privkey.pem" 2>/dev/null || true
     chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null || true
     return 0
   fi
@@ -4723,7 +4882,8 @@ _ensure_hy2_self_signed_cert() {
       -subj "/CN=${sni}" \
       -addext "subjectAltName=DNS:${sni}" >/dev/null 2>&1; then
     chmod 755 "$CERT_DIR" 2>/dev/null || true
-    chmod 644 "$CERT_DIR"/*.pem 2>/dev/null || true
+    chmod 644 "$CERT_DIR/fullchain.pem" 2>/dev/null || true
+    chmod 600 "$CERT_DIR/privkey.pem" 2>/dev/null || true
     chown -R nobody:nogroup "$CERT_DIR" 2>/dev/null || chown -R nobody:nobody "$CERT_DIR" 2>/dev/null || true
     return 0
   fi
@@ -4870,7 +5030,7 @@ if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_P
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         echo -e "${YELLOW}>>> 端口跳跃范围: ${HY2_HOP_RANGE}/udp，请在云厂商安全组放行该 UDP 范围。${NC}"
     fi
-    verify_node_activation "$CORE_NAME" "$HY2_PORT" "hysteria2"
+    finalize_node_activation "$CORE_NAME" "$HY2_PORT" "hysteria2" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
 else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
@@ -4934,21 +5094,30 @@ _iptables_forward_rule() {
     POSTROUTING)
       "$ipt" -t nat "$action" POSTROUTING -p "$proto" -d "$target_ip" --dport "$target_port" -j MASQUERADE 2>/dev/null
       ;;
+    FORWARD_OUT)
+      "$ipt" "$action" FORWARD -p "$proto" -d "$target_ip" --dport "$target_port" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+      ;;
+    FORWARD_IN)
+      "$ipt" "$action" FORWARD -p "$proto" -s "$target_ip" --sport "$target_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+      ;;
     *) return 1 ;;
   esac
 }
 
 _ensure_iptables_forward_rule() {
   local listen_port="$1" proto="$2" target_ip="$3" target_port="$4" chain
-  for chain in PREROUTING OUTPUT POSTROUTING; do
+  for chain in PREROUTING OUTPUT POSTROUTING FORWARD_OUT FORWARD_IN; do
     _iptables_forward_rule -C "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || \
-      _iptables_forward_rule -A "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
+      _iptables_forward_rule -A "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || {
+        _delete_iptables_forward_rule "$listen_port" "$proto" "$target_ip" "$target_port"
+        return 1
+      }
   done
 }
 
 _delete_iptables_forward_rule() {
   local listen_port="$1" proto="$2" target_ip="$3" target_port="$4" chain
-  for chain in PREROUTING OUTPUT POSTROUTING; do
+  for chain in PREROUTING OUTPUT POSTROUTING FORWARD_OUT FORWARD_IN; do
     while _iptables_forward_rule -C "$chain" "$listen_port" "$proto" "$target_ip" "$target_port"; do
       _iptables_forward_rule -D "$chain" "$listen_port" "$proto" "$target_ip" "$target_port" || break
     done
@@ -4958,9 +5127,13 @@ _delete_iptables_forward_rule() {
 _apply_iptables_forward() {
   local listen_port="$1" proto="$2" target_ip="$3" target_port="$4"
   _iptables_bin >/dev/null 2>&1 || return 1
+  _iptables_persistence_available || return 1
   _enable_ipv4_forwarding
   _ensure_iptables_forward_rule "$listen_port" "$proto" "$target_ip" "$target_port" || return 1
-  _save_iptables_if_possible
+  if ! _save_iptables_if_possible; then
+    _delete_iptables_forward_rule "$listen_port" "$proto" "$target_ip" "$target_port"
+    return 1
+  fi
 }
 
 _remove_iptables_forward() {
@@ -4980,10 +5153,12 @@ _forward_unit_file() {
 }
 
 _write_socat_forward() {
-  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" unit_file unit_name socat_bin
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" unit_file unit_name socat_bin target_spec family=""
   unit_name=$(_forward_unit_name "$listen_port" "$proto")
   unit_file=$(_forward_unit_file "$listen_port" "$proto")
   socat_bin=$(command -v socat 2>/dev/null || echo /usr/bin/socat)
+  target_spec="$target_host"
+  if [[ "$target_host" == *:* ]]; then target_spec="[${target_host#[}"; target_spec="${target_spec%]}]"; family="6"; fi
   mkdir -p "$PORT_FORWARD_STATE_DIR"
   cat > "$unit_file" <<EOFUNIT
 [Unit]
@@ -4993,7 +5168,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${socat_bin} $([ "$proto" = "tcp" ] && printf 'TCP-LISTEN:%s,fork,reuseaddr TCP:%s:%s' "$listen_port" "$target_host" "$target_port" || printf 'UDP-LISTEN:%s,fork,reuseaddr UDP:%s:%s' "$listen_port" "$target_host" "$target_port")
+ExecStart=${socat_bin} $([ "$proto" = "tcp" ] && printf 'TCP-LISTEN:%s,fork,reuseaddr TCP%s:%s:%s' "$listen_port" "$family" "$target_spec" "$target_port" || printf 'UDP-LISTEN:%s,fork,reuseaddr UDP%s:%s:%s' "$listen_port" "$family" "$target_spec" "$target_port")
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -5006,7 +5181,7 @@ EOFUNIT
 }
 
 _write_forward_state() {
-  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" mode="$5" target_ip="${6:-}" unit="${7:-}"
+  local listen_port="$1" proto="$2" target_host="$3" target_port="$4" mode="$5" target_ip="${6:-}" unit="${7:-}" ufw_added="${8:-0}"
   local q_target_host q_mode q_target_ip q_unit
   q_target_host=$(_shell_single_quote "$target_host")
   q_mode=$(_shell_single_quote "$mode")
@@ -5020,6 +5195,7 @@ TARGET_PORT=${target_port}
 MODE=${q_mode}
 TARGET_IP=${q_target_ip}
 UNIT=${q_unit}
+UFW_ADDED=${ufw_added}
 EOFSTATE
   chmod 600 "$(_forward_state_file "$listen_port" "$proto")" 2>/dev/null || true
 }
@@ -5027,7 +5203,7 @@ EOFSTATE
 _apply_port_forward() {
   local listen_port="$1" proto="$2" target_host="$3" target_port="$4" target_ip=""
   mkdir -p "$PORT_FORWARD_STATE_DIR"
-  if target_ip=$(_resolve_target_ipv4 "$target_host"); then
+  if [[ "$target_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && target_ip=$(_resolve_target_ipv4 "$target_host"); then
     if _apply_iptables_forward "$listen_port" "$proto" "$target_ip" "$target_port"; then
       _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "iptables" "$target_ip" ""
       return 0
@@ -5038,7 +5214,25 @@ _apply_port_forward() {
     _write_forward_state "$listen_port" "$proto" "$target_host" "$target_port" "socat" "" "$(_forward_unit_name "$listen_port" "$proto")"
     return 0
   fi
+  rm -f "$(_forward_unit_file "$listen_port" "$proto")"
+  _svc_daemon_reload >/dev/null 2>&1 || true
   return 1
+}
+
+_remove_port_forward_state() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT UFW_ADDED
+  . "$f" 2>/dev/null || return 1
+  if [ "${MODE:-}" = "iptables" ]; then
+    _remove_iptables_forward "$LISTEN_PORT" "$PROTO" "$TARGET_IP" "$TARGET_PORT"
+  else
+    [ -n "${UNIT:-}" ] && systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+    [ -n "${LISTEN_PORT:-}" ] && [ -n "${PROTO:-}" ] && rm -f "$(_forward_unit_file "$LISTEN_PORT" "$PROTO")"
+  fi
+  _ufw_delete_if_added "${LISTEN_PORT:-}" "${PROTO:-}" "${UFW_ADDED:-0}"
+  rm -f "$f"
+  _svc_daemon_reload >/dev/null 2>&1 || true
 }
 
 _list_port_forwards() {
@@ -5122,11 +5316,13 @@ fi
 
 if ! confirm_action "添加快捷中转 ${listen_port} -> ${target_host}:${target_port}"; then pause_for_enter; return; fi
 install_dependencies
-local ok=1 before_mode state_file
+local ok=1 state_file added_files=()
 for p in $protos; do
   if _apply_port_forward "$listen_port" "$p" "$target_host" "$target_port"; then
     _ufw_allow_if_active "$listen_port" "$p"
     state_file=$(_forward_state_file "$listen_port" "$p")
+    sed -i "s/^UFW_ADDED=.*/UFW_ADDED=${VPSBOX_UFW_RULE_ADDED:-0}/" "$state_file"
+    added_files+=("$state_file")
     unset MODE
     . "$state_file" 2>/dev/null || true
     echo -e "${GREEN}  ✓ ${p} 转发已启动: ${listen_port} -> ${target_host}:${target_port} (${MODE:-unknown})${NC}"
@@ -5135,7 +5331,12 @@ for p in $protos; do
     echo -e "${RED}  ✗ ${p} 转发启动失败${NC}"
   fi
 done
-[ "$ok" -eq 1 ] && echo -e "\n${GREEN}[成功] 快捷中转已添加。iptables 模式性能更好；socat 模式更兼容。${NC}" || echo -e "\n${YELLOW}[警告] 部分转发启动失败，请检查规则。${NC}"
+if [ "$ok" -eq 1 ]; then
+  echo -e "\n${GREEN}[成功] 快捷中转已添加。iptables 模式性能更好；域名/IPv6 目标使用 socat 以支持动态解析。${NC}"
+else
+  for state_file in "${added_files[@]}"; do _remove_port_forward_state "$state_file"; done
+  echo -e "\n${RED}[错误] 转发未能全部启动，已回滚本次创建的规则和服务。${NC}"
+fi
 pause_for_enter
 }
 
@@ -5157,17 +5358,10 @@ del_idx="${del_idx// /}"
 [ "$del_idx" = "0" ] && return
 if ! [[ "$del_idx" =~ ^[0-9]+$ ]] || [ "$del_idx" -lt 1 ] || [ "$del_idx" -gt "${#files[@]}" ]; then echo -e "${RED}[错误] 编号无效。${NC}"; pause_for_enter; return; fi
 f="${files[$((del_idx-1))]}"
-unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT
+unset LISTEN_PORT PROTO TARGET_HOST TARGET_PORT MODE TARGET_IP UNIT UFW_ADDED
 . "$f" 2>/dev/null || true
 if ! confirm_action "删除转发 ${PROTO} :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}" "n"; then pause_for_enter; return; fi
-if [ "${MODE:-}" = "iptables" ]; then
-  _remove_iptables_forward "$LISTEN_PORT" "$PROTO" "$TARGET_IP" "$TARGET_PORT"
-else
-  [ -n "${UNIT:-}" ] && systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
-  [ -n "${LISTEN_PORT:-}" ] && [ -n "${PROTO:-}" ] && rm -f "$(_forward_unit_file "$LISTEN_PORT" "$PROTO")"
-fi
-rm -f "$f"
-_svc_daemon_reload >/dev/null 2>&1 || true
+_remove_port_forward_state "$f"
 echo -e "\n${GREEN}[成功] 转发规则已删除。${NC}"
 pause_for_enter
 }
@@ -5202,12 +5396,6 @@ elif command -v apk &>/dev/null; then apk add ufw >/dev/null 2>&1
 elif command -v pacman &>/dev/null; then pacman -S --noconfirm ufw >/dev/null 2>&1
 elif command -v zypper &>/dev/null; then zypper install -y ufw >/dev/null 2>&1
 fi || echo -e "${RED}[错误] UFW 安装失败。${NC}"
-_svc_stop netfilter-persistent 2>/dev/null
-while iptables -L INPUT -n --line-numbers 2>/dev/null | grep -q "REJECT"; do
-    local N
-    N=$(iptables -L INPUT -n --line-numbers 2>/dev/null | grep "REJECT" | head -1 | awk '{print $1}')
-    iptables -D INPUT "$N" 2>/dev/null
-done
 fi
 install_dependencies
 echo -e "  ${GREEN}1.${NC} 查看当前防火墙状态与已放行端口\n  ${GREEN}2.${NC} 放行指定新端口 (TCP/UDP)\n  ${GREEN}3.${NC} 删除某个端口规则\n  ${GREEN}4.${NC} 开启防火墙\n  ${GREEN}5.${NC} 彻底关闭防火墙\n  ${GREEN}6.${NC} 一键仅放行正在使用的端口 (关闭所有未占用)\n  ${GREEN}7.${NC} 一键打开所有入站端口\n  ${GREEN}0.${NC} 返回主菜单"
@@ -5998,8 +6186,16 @@ case $sk_opt in
   chmod 700 "${HOME}"
   mkdir -p "${HOME}/.ssh"; chmod 700 "${HOME}/.ssh"
   touch "${HOME}/.ssh/authorized_keys"
-  ssh-keygen -t ed25519 -C "vpsbox-key" -f "${HOME}/.ssh/vpsbox_key" -N "" -q
-  cat "${HOME}/.ssh/vpsbox_key.pub" >> "${HOME}/.ssh/authorized_keys"
+  if [ -f "${HOME}/.ssh/vpsbox_key" ] || [ -f "${HOME}/.ssh/vpsbox_key.pub" ]; then
+    echo -e "${YELLOW}[提示] 已存在 VPSBox 密钥，将复用现有密钥，不会覆盖。${NC}"
+    if [ ! -s "${HOME}/.ssh/vpsbox_key" ] || [ ! -s "${HOME}/.ssh/vpsbox_key.pub" ]; then
+      echo -e "${RED}[错误] 现有密钥对不完整，请先备份并移走 vpsbox_key 文件。${NC}"; pause_for_enter; continue
+    fi
+  elif ! ssh-keygen -t ed25519 -C "vpsbox-key" -f "${HOME}/.ssh/vpsbox_key" -N "" -q; then
+    echo -e "${RED}[错误] SSH 密钥生成失败。${NC}"; pause_for_enter; continue
+  fi
+  grep -Fxq "$(cat "${HOME}/.ssh/vpsbox_key.pub")" "${HOME}/.ssh/authorized_keys" 2>/dev/null || cat "${HOME}/.ssh/vpsbox_key.pub" >> "${HOME}/.ssh/authorized_keys"
+  chmod 600 "${HOME}/.ssh/vpsbox_key"
   chmod 600 "${HOME}/.ssh/authorized_keys"
   echo ""
   echo -e "${YELLOW}>>> 私钥内容如下（请立即复制保存，命名为 vpsbox_key）:${NC}"
@@ -6292,15 +6488,17 @@ case $ms_opt in
 1)
 if ! confirm_action "从 GitHub 拉取最新版覆盖当前脚本"; then continue; fi
 echo -e "\n${CYAN}>>> 正在下载...${NC}"
-curl -sL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o /tmp/vpsbox_update.sh
-if [ -s /tmp/vpsbox_update.sh ] && \
-   grep -qE '^VPSBOX_VERSION="v?[0-9]+([.][0-9]+){1,3}"' /tmp/vpsbox_update.sh && \
-   bash -n /tmp/vpsbox_update.sh; then
-mv /tmp/vpsbox_update.sh "$SHORTCUT_PATH"; chmod +x "$SHORTCUT_PATH"
+local update_tmp
+update_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建更新临时文件。${NC}"; pause_for_enter; continue; }
+curl -fsSL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o "$update_tmp"
+if [ -s "$update_tmp" ] && \
+   grep -qE '^VPSBOX_VERSION="v?[0-9]+([.][0-9]+){1,3}"' "$update_tmp" && \
+   bash -n "$update_tmp" && _verify_sha256_if_set "$update_tmp" "${VPSBOX_UPDATE_SHA256:-}"; then
+install -m 755 "$update_tmp" "$SHORTCUT_PATH"; rm -f "$update_tmp"
 echo -e "\n${GREEN}[成功] 已更新！${NC}"
 echo -e "${YELLOW}即将重启脚本...${NC}"; sleep 2; exec "$SHORTCUT_PATH"
 else
-echo -e "\n${RED}[错误] 下载失败或文件异常。${NC}"; rm -f /tmp/vpsbox_update.sh
+echo -e "\n${RED}[错误] 下载失败、文件异常或校验不通过。${NC}"; rm -f "$update_tmp"
 fi
 pause_for_enter ;;
 2)
