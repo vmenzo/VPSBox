@@ -3222,6 +3222,7 @@ POSTGRES_PASSWORD=${pg_password}
 POSTGRES_DB=picvault
 
 APP_HOST_PORT=${port}
+APP_BIND_ADDRESS=0.0.0.0
 PICVAULT_BACKUP_DIR=/app/backups
 ALLOW_REGISTER=true
 VITE_ALLOW_REGISTER=true
@@ -3229,6 +3230,7 @@ APP_PUBLIC_URL=${public_url}
 
 TRUST_PROXY=loopback, linklocal, uniquelocal
 ENABLE_HSTS=false
+TRUST_PROXY_HEADERS=false
 FRAME_ANCESTORS=self
 TOKEN_EXPIRES_IN=7d
 PASSWORD_RESET_EXPIRES_MINUTES=30
@@ -3256,6 +3258,30 @@ EOF
 
   chmod 600 "$env_file" 2>/dev/null || true
   echo -e "${GREEN}[完成] 已生成 PicVault 环境配置: ${env_file}${NC}"
+}
+
+_picvault_sync_env() {
+  local env_file="$PICVAULT_INSTALL_DIR/.env"
+  [ -f "$env_file" ] || return 1
+
+  if ! grep -q '^APP_BIND_ADDRESS=' "$env_file"; then
+    echo 'APP_BIND_ADDRESS=0.0.0.0' >> "$env_file"
+  fi
+  if ! grep -q '^TRUST_PROXY_HEADERS=' "$env_file"; then
+    echo 'TRUST_PROXY_HEADERS=false' >> "$env_file"
+  fi
+}
+
+_picvault_wait_healthy() {
+  local attempt
+  for attempt in $(seq 1 60); do
+    if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T frontend \
+      node -e "fetch('http://127.0.0.1:7899/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))") >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 _picvault_clone_or_update() {
@@ -3303,14 +3329,22 @@ picvault_install_or_update() {
   echo -e "\n${CYAN}>>> 正在拉取 PicVault 代码...${NC}"
   _picvault_clone_or_update || { pause_for_enter; return; }
   _picvault_write_env_if_missing || { pause_for_enter; return; }
+  _picvault_sync_env || { echo -e "${RED}[错误] PicVault 环境配置更新失败。${NC}"; pause_for_enter; return; }
 
   echo -e "\n${CYAN}>>> 正在构建并启动 PicVault，请耐心等待...${NC}"
   if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose up -d --build); then
     local app_port
     app_port=$(grep -E '^APP_HOST_PORT=' "$PICVAULT_INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2-)
-    echo -e "\n${GREEN}[成功] PicVault 已启动。${NC}"
-    [ -n "$app_port" ] && _ufw_allow_if_active "$app_port" tcp
-    _picvault_show_access
+    [ -z "$app_port" ] && app_port="$PICVAULT_DEFAULT_PORT"
+    echo -e "\n${CYAN}>>> 正在等待 PicVault 健康检查...${NC}"
+    if _picvault_wait_healthy; then
+      echo -e "\n${GREEN}[成功] PicVault 已启动。${NC}"
+      _ufw_allow_if_active "$app_port" tcp
+      _picvault_show_access
+    else
+      echo -e "\n${RED}[错误] PicVault 容器已启动，但健康检查未通过，请查看日志。${NC}"
+      (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose ps)
+    fi
   else
     echo -e "\n${RED}[错误] PicVault 启动失败，请查看日志。${NC}"
   fi
