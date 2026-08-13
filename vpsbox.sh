@@ -28,6 +28,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh"
 NODE_RECORD_FILE="/etc/vpsbox_nodes.txt"
 INSTALL_LOG="/tmp/vpsbox_install.log"
 CORE_INSTALL_LOG="/tmp/vpsbox_core_install.log"
+DOCKER_INSTALL_LOG="/tmp/vpsbox_docker_install.log"
 XRAY_CONFIG_FILE="/usr/local/etc/xray/config.json"
 SINGBOX_CONFIG_FILE="/etc/sing-box/config.json"
 XRAY_NODES_DIR="/usr/local/etc/xray/nodes.d"
@@ -1003,7 +1004,7 @@ _trusted_script_url() {
   [[ "$url" == https://* ]] || return 1
   host="${url#https://}"; host="${host%%/*}"; host="${host%%:*}"
   case "$host" in
-    raw.githubusercontent.com|github.com|sing-box.app|chatgpt.com|claude.ai|Check.Place|check.place|gitlab.com) return 0 ;;
+    raw.githubusercontent.com|github.com|linuxmirrors.cn|sing-box.app|chatgpt.com|claude.ai|Check.Place|check.place|gitlab.com) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3030,25 +3031,6 @@ done
 pause_for_enter
 }
 
-resolve_docker_codename() {
-    local os_id="${ID:-debian}"
-    local os_codename
-    os_codename=$(lsb_release -cs 2>/dev/null || echo '')
-    if [ "$os_id" = "debian" ]; then
-        case "$os_codename" in
-            bullseye|bookworm) echo "$os_codename" ;;
-            *) echo "bookworm" ;;
-        esac
-    elif [ "$os_id" = "ubuntu" ]; then
-        case "$os_codename" in
-            focal|jammy|noble) echo "$os_codename" ;;
-            *) echo "noble" ;;
-        esac
-    else
-        echo "bookworm"
-    fi
-}
-
 docker_install() {
 clear_screen; print_divider
 print_center "[ Docker 与 Docker Compose 一键安装 ]" "$CYAN"
@@ -3060,10 +3042,20 @@ pause_for_enter; return
 fi
 if ! confirm_action "安装 Docker 与 Docker Compose"; then pause_for_enter; return; fi
 install_dependencies
+local _docker_dependency
+for _docker_dependency in curl gpg; do
+  if ! command -v "$_docker_dependency" >/dev/null 2>&1; then
+    echo -e "\n${RED}[错误] Docker 安装依赖缺失: ${_docker_dependency}${NC}"
+    echo -e "${YELLOW}依赖安装日志：${INSTALL_LOG}${NC}"
+    pause_for_enter
+    return 1
+  fi
+done
 echo -e "\n${CYAN}>>> 正在通过 linuxmirrors.cn 安装 Docker...${NC}\n${YELLOW}   请耐心等待，约需 1-3 分钟${NC}"
 
-local _country
+local _country _docker_installer_rc=0 _docker_service_ok=0
 _country=$(curl -s --max-time 5 ipinfo.io/country 2>/dev/null)
+: > "$DOCKER_INSTALL_LOG" 2>/dev/null || true
 
 if [ "$_country" = "CN" ]; then
   _run_remote_bash https://linuxmirrors.cn/docker.sh \
@@ -3073,7 +3065,8 @@ if [ "$_country" = "CN" ]; then
     --use-intranet-source false \
     --install-latest true \
     --close-firewall false \
-    --ignore-backup-tips
+    --ignore-backup-tips 2>&1 | tee "$DOCKER_INSTALL_LOG"
+  _docker_installer_rc=${PIPESTATUS[0]}
 else
   _run_remote_bash https://linuxmirrors.cn/docker.sh \
     --source download.docker.com \
@@ -3082,7 +3075,24 @@ else
     --use-intranet-source false \
     --install-latest true \
     --close-firewall false \
-    --ignore-backup-tips
+    --ignore-backup-tips 2>&1 | tee "$DOCKER_INSTALL_LOG"
+  _docker_installer_rc=${PIPESTATUS[0]}
+fi
+
+if [ "$_docker_installer_rc" -ne 0 ]; then
+  echo -e "\n${RED}[错误] Docker 安装器执行失败（退出码: ${_docker_installer_rc}）。${NC}"
+  echo -e "${YELLOW}最近的错误输出：${NC}"
+  tail -n 30 "$DOCKER_INSTALL_LOG" 2>/dev/null | sed 's/^/  /'
+  echo -e "${YELLOW}完整日志：${DOCKER_INSTALL_LOG}${NC}"
+  pause_for_enter
+  return 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo -e "\n${RED}[错误] 安装器已结束，但未找到 docker 命令。${NC}"
+  echo -e "${YELLOW}完整日志：${DOCKER_INSTALL_LOG}${NC}"
+  pause_for_enter
+  return 1
 fi
 
 if [ "$_country" = "CN" ]; then
@@ -3104,14 +3114,22 @@ EOF
 fi
 
 _svc_enable docker >/dev/null 2>&1
-_svc_restart docker >/dev/null 2>&1
+if _svc_restart docker >/dev/null 2>&1 && _svc_is_active docker; then
+  _docker_service_ok=1
+fi
 
-if command -v docker &>/dev/null; then
 echo -e "\n${GREEN}[成功] Docker 安装完成！${NC}"
 echo -e "  Docker: $(docker --version 2>/dev/null)"
-echo -e "  Compose: $(docker compose version 2>/dev/null)"
+if docker compose version >/dev/null 2>&1; then
+  echo -e "  Compose: $(docker compose version 2>/dev/null)"
 else
-echo -e "\n${RED}[错误] Docker 安装失败，请检查系统兼容性或手动安装。${NC}"
+  echo -e "  ${YELLOW}Compose: 未检测到 Docker Compose 插件${NC}"
+fi
+if [ "$_docker_service_ok" -eq 1 ]; then
+  echo -e "  服务状态: ${GREEN}运行中${NC}"
+else
+  echo -e "  服务状态: ${YELLOW}Docker 已安装，但服务未能启动${NC}"
+  echo -e "${YELLOW}请运行: systemctl status docker --no-pager -l${NC}"
 fi
 pause_for_enter
 }
