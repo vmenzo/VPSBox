@@ -36,7 +36,7 @@ VPS Box 是一个面向 Linux VPS 的交互式运维工具。项目以菜单方�
 推荐使用以下命令运行：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 ```
 
 首次运行后会自动同步快捷命令：

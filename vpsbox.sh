@@ -2,7 +2,7 @@
 # =====================================================================
 # 项目名称: VPS Box (轻量级节点管理与网络优化引擎)
 # 版本: v1.3
-# 推荐运行方式: bash <(curl -sL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
+# 推荐运行方式: bash <(curl -fsSL https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh)
 # =====================================================================
 VPSBOX_VERSION="v1.3"
 
@@ -246,7 +246,7 @@ local default=${2:-y}
 local hint
 if [[ "$default" =~ ^[yY]$ ]]; then hint="Y/n"; else hint="y/N"; fi
 echo ""
-read -r -p "> 是否确认执行 [${action_name}]？(${hint}): " confirm
+read -r -p "> 是否确认执行 [${action_name}]？(${hint}): " confirm || return 1
 confirm="${confirm// /}"
 [ -z "$confirm" ] && confirm="$default"
 if [[ ! "$confirm" =~ ^[yY]$ ]]; then
@@ -487,7 +487,7 @@ _valid_domain_name() {
 _read_domain_or_retry() {
   local __var="$1" prompt="$2" value
   while true; do
-    read -r -p "$prompt" value
+    read -r -p "$prompt" value || return 1
     value="${value// /}"
     [ "$value" = "0" ] && return 1
     if _valid_domain_name "$value"; then
@@ -1310,7 +1310,7 @@ while true; do
     echo -e "\n${GREEN}[成功] 密码已成功修改！${NC}"; break
   else
     echo -e "\n${RED}[错误] 密码修改失败！${NC}"
-    read -r -p "> 是否继续重试？(y/n, 默认 y): " retry_pwd
+    read -r -p "> 是否继续重试？(y/n, 默认 y): " retry_pwd || return 1
     [[ "${retry_pwd// /}" =~ ^[nN]$ ]] && { echo -e "${YELLOW}已退出。${NC}"; break; }
     echo -e "\n${CYAN}>>> 请重新设置密码：${NC}"
   fi
@@ -1324,12 +1324,12 @@ clear_screen; print_divider
 print_center "[ SSH 密钥与登录安全管理 ]" "$CYAN"
 echo -e "  ${GREEN}1.${NC} 添加/覆盖 SSH 公钥\n  ${GREEN}2.${NC} 删除所有 SSH 公钥\n  ${GREEN}3.${NC} 禁用密码登录 (强制使用密钥)\n  ${GREEN}4.${NC} 开启密码登录\n  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请选择操作 [0-4]: " ssh_opt
+_read_menu_choice ssh_opt "> 请选择操作 [0-4]: "
 ssh_opt="${ssh_opt// /}"
 case $ssh_opt in
 1)
 while true; do
-read -r -p "> 请粘贴您的公钥 (通常以 ssh-rsa 开头, 输入 0 取消): " pub_key
+read -r -p "> 请粘贴您的公钥 (通常以 ssh-rsa 开头, 输入 0 取消): " pub_key || break
 if [ "$pub_key" == "0" ]; then break; fi
 if [ -z "$pub_key" ]; then echo -e "${RED}[错误] 密钥内容不能为空，请重新输入！${NC}"; continue; fi
 if ! echo "$pub_key" | grep -Eq '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp[0-9]+) '; then echo -e "${RED}[错误] SSH 公钥格式不正确，请粘贴完整公钥。${NC}"; continue; fi
@@ -1337,7 +1337,7 @@ if ! confirm_action "导入此 SSH 公钥"; then break; fi
 mkdir -p ~/.ssh; chmod 700 ~/.ssh
 if [ -s ~/.ssh/authorized_keys ]; then
 echo -e "\n${YELLOW}[发现] 系统中已存在其他 SSH 密钥记录。${NC}"
-read -r -p "> 是否清空旧密钥并覆盖？(y-覆盖清空 / n-保留追加, 默认 n): " overwrite_opt
+read -r -p "> 是否清空旧密钥并覆盖？(y-覆盖清空 / n-保留追加, 默认 n): " overwrite_opt || break
 overwrite_opt="${overwrite_opt// /}"
 if [[ "$overwrite_opt" =~ ^[yY]$ ]]; then : > ~/.ssh/authorized_keys; echo -e "${CYAN}>>> 已清空历史废弃密钥。${NC}"; fi
 fi
@@ -1379,7 +1379,7 @@ cur_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
 echo -e "  当前 SSH 端口: ${YELLOW}${cur_port}${NC}"
 echo -e "  ${CYAN}建议使用 10000-65535 范围的端口，避免与常用服务冲突。${NC}\n"
 while true; do
-  read -r -p "> 请输入新端口 (0 取消 / 22 恢复默认): " new_port
+  read -r -p "> 请输入新端口 (0 取消 / 22 恢复默认): " new_port || return 1
   new_port="${new_port// /}"
   [ "$new_port" = "0" ] || [ -z "$new_port" ] && return
   [[ "$new_port" =~ ^[0-9]+$ ]] || { echo -e "${RED}[错误] 请输入纯数字。${NC}"; continue; }
@@ -1419,7 +1419,7 @@ clear_screen; print_divider
 print_center "[ 修改主机名 ]" "$CYAN"
 echo -e "  当前主机名: ${YELLOW}$(hostname)${NC}\n"
 while true; do
-  read -r -p "> 请输入新主机名 (字母/数字/连字符, 0 取消): " new_hostname
+  read -r -p "> 请输入新主机名 (字母/数字/连字符, 0 取消): " new_hostname || return 1
   new_hostname="${new_hostname// /}"
   [ "$new_hostname" = "0" ] && return
   [ -z "$new_hostname" ] && { echo -e "${RED}[错误] 主机名不能为空。${NC}"; continue; }
@@ -1446,7 +1446,7 @@ echo -e "  ${GREEN}1.${NC} 设为北京时间 (Asia/Shanghai)  ${CYAN}[推荐]${
 echo -e "  ${GREEN}2.${NC} 自定义时区"
 echo -e "  ${GREEN}0.${NC} 返回"
 echo ""
-read -r -p "> 请选择: " tz_opt
+_read_menu_choice tz_opt "> 请选择: "
 case "${tz_opt// /}" in
 1)
   if ! confirm_action "设置时区为 Asia/Shanghai"; then return; fi
@@ -1490,7 +1490,7 @@ echo -e "  ${GREEN}1.${NC} 创建/修改 Swap"
 echo -e "  ${GREEN}2.${NC} 关闭并删除 Swap"
 echo -e "  ${GREEN}0.${NC} 返回"
 echo ""
-read -r -p "> 请选择 [0-2]: " swap_opt
+_read_menu_choice swap_opt "> 请选择 [0-2]: "
 swap_opt="${swap_opt// /}"
 case $swap_opt in
 1)
@@ -1501,7 +1501,7 @@ case $swap_opt in
   echo -e "    内存 > 4G → 推荐 4096MB"
   echo ""
   while true; do
-    read -r -p "> 请输入 Swap 大小 (MB，如 1024 / 2048): " input_size
+    read -r -p "> 请输入 Swap 大小 (MB，如 1024 / 2048): " input_size || return 1
     input_size="${input_size// /}"
     [[ "$input_size" =~ ^[0-9]+$ ]] || { echo -e "${RED}[错误] 请输入纯数字。${NC}"; continue; }
     if [ "$((10#$input_size))" -gt 32768 ]; then echo -e "${RED}[错误] Swap 大小不能超过 32768MB（32G）。${NC}"; continue; fi
@@ -1771,7 +1771,7 @@ _dns_menu_row 4 "手动设置" "自定义 DNS 地址"
 _dns_menu_row 5 "解除写保护" "取消 /etc/resolv.conf 不可变属性"
 _dns_menu_row 0 "返回" ""
 echo ""
-read -r -p "> 请选择 [0-5]: " dns_opt
+_read_menu_choice dns_opt "> 请选择 [0-5]: "
 dns_opt="${dns_opt// /}"
 
 case $dns_opt in
@@ -1795,8 +1795,8 @@ case $dns_opt in
   pause_for_enter ;;
 4)
   echo ""
-  read -r -p "> 请输入主 DNS (IPv4): " _d1
-  read -r -p "> 请输入备 DNS (IPv4，可留空): " _d2
+  read -r -p "> 请输入主 DNS (IPv4): " _d1 || return 1
+  read -r -p "> 请输入备 DNS (IPv4，可留空): " _d2 || return 1
   [ -z "$_d1" ] && continue
   [ -z "$_d2" ] && _d2="$_d1"
   _dns_apply "$_d1" "$_d2" "" ""
@@ -2768,7 +2768,7 @@ _bbr_delete_kernel() {
     echo -e "\n${RED}⚠ 包含当前运行内核！请确保有另一内核可用，否则重启后变砖！${NC}"
     read -r -p "> 输入大写的 YES 确认: " confirm; [[ "$confirm" != "YES" ]] && return
   else
-    read -r -p "> 确认删除？(Y/n): " confirm; [[ "$confirm" =~ ^[nN]$ ]] && return
+    read -r -p "> 确认删除？(Y/n): " confirm || return; [[ "$confirm" =~ ^[nN]$ ]] && return
   fi
   if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
     # shellcheck disable=SC2086
@@ -3009,7 +3009,7 @@ echo -e "  ${GREEN}14.${NC} 查看已安装内核      ${GREEN}15.${NC} 删除�
 echo ""
 echo -e "  ${GREEN} 0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请输入选择: " bbr_opt
+_read_menu_choice bbr_opt "> 请输入选择: "
 bbr_opt="${bbr_opt// /}"
 
 case $bbr_opt in
@@ -3339,6 +3339,12 @@ _trim_ws() {
   printf '%s' "$v"
 }
 
+# docker compose 会对 .env 里未加引号的值做 $VAR/${VAR} 插值：密码含 $ 会被截断或置空。
+# 写入 .env 前把 $ 转义为 $$（只转义写文件的值，不改内存里的原值；自动生成的密码是纯十六进制，不受影响）。
+_lumina_env_escape() {
+  printf '%s' "${1//\$/\$\$}"
+}
+
 # 部署时自动生成的管理员密码只在安装成功时显示一次，不写入日志、不在状态页显示。
 LUMINA_GENERATED_PASSWORD=""
 
@@ -3357,7 +3363,7 @@ _lumina_write_env_if_missing() {
   echo -e "  ${CYAN}部署模式：${NC}"
   echo -e "  ${GREEN}1.${NC} 域名模式（HTTPS，Caddy 自动签发证书，需要 80 和 443 端口空闲）"
   echo -e "  ${GREEN}2.${NC} IP 模式（HTTP，仅需 80 端口）"
-  read -r -p "> 请选择 [1/2，默认 2]: " deploy_mode
+  _read_menu_choice deploy_mode "> 请选择 [1/2，默认 2]: "
   deploy_mode="${deploy_mode// /}"
   [ -z "$deploy_mode" ] && deploy_mode="2"
   case "$deploy_mode" in
@@ -3468,15 +3474,26 @@ _lumina_write_env_if_missing() {
   img_key=$(_lumina_gen_hex 32)
   img_salt=$(_lumina_gen_hex 32)
 
+  # 写 .env 前把用户输入值里的 $ 转义为 $$，防止 docker compose 插值改写密码/密钥。
+  local admin_user_env admin_email_env admin_pass_env
+  local r2_endpoint_env r2_bucket_env r2_key_id_env r2_key_secret_env
+  admin_user_env=$(_lumina_env_escape "$admin_user")
+  admin_email_env=$(_lumina_env_escape "$admin_email")
+  admin_pass_env=$(_lumina_env_escape "$admin_pass")
+  r2_endpoint_env=$(_lumina_env_escape "$r2_endpoint")
+  r2_bucket_env=$(_lumina_env_escape "$r2_bucket")
+  r2_key_id_env=$(_lumina_env_escape "$r2_key_id")
+  r2_key_secret_env=$(_lumina_env_escape "$r2_key_secret")
+
   cat > "$env_file" <<EOF
 APP_DOMAIN=${app_domain}
 CDN_DOMAIN=${cdn_domain}
 APP_PUBLIC_URL=${app_public_url}
 CDN_PUBLIC_URL=${cdn_public_url}
 
-ADMIN_USERNAME=${admin_user}
-ADMIN_EMAIL=${admin_email}
-ADMIN_PASSWORD=${admin_pass}
+ADMIN_USERNAME=${admin_user_env}
+ADMIN_EMAIL=${admin_email_env}
+ADMIN_PASSWORD=${admin_pass_env}
 
 JWT_SECRET=${jwt_secret}
 LOCAL_SIGN_SECRET=${local_sign_secret}
@@ -3491,10 +3508,10 @@ LOCAL_ENABLED=true
 
 R2_ENABLED=${r2_enabled}
 R2_ACCOUNT_ID=
-R2_ENDPOINT=${r2_endpoint}
-R2_BUCKET=${r2_bucket}
-R2_ACCESS_KEY_ID=${r2_key_id}
-R2_SECRET_ACCESS_KEY=${r2_key_secret}
+R2_ENDPOINT=${r2_endpoint_env}
+R2_BUCKET=${r2_bucket_env}
+R2_ACCESS_KEY_ID=${r2_key_id_env}
+R2_SECRET_ACCESS_KEY=${r2_key_secret_env}
 # R2_PUBLIC_URL 保持留空：留空时图片直链走图片域名 /raw/；填了反而无法访问
 R2_PUBLIC_URL=
 
@@ -3543,9 +3560,11 @@ _lumina_sync_env() {
   # ADMIN_PASSWORD 缺失时先生成一次并记下来：写进文件和显示给用户必须是同一个值，
   # 否则补生成的密码谁也不知道，管理员会被锁在门外。
   local _admin_pass_missing=0 _generated_admin_pass=""
-  if ! grep -q "^ADMIN_PASSWORD=" "$env_file"; then
+  if ! grep -q "^ADMIN_PASSWORD=." "$env_file"; then
     _admin_pass_missing=1
     _generated_admin_pass="Lumina_$(_lumina_gen_hex 6)!"
+    # 键缺失或值为空：先删掉已有的空行，否则后面的补键会因“键已存在”而跳过，文件仍是空密码
+    sed -i '/^ADMIN_PASSWORD=/d' "$env_file" 2>/dev/null || true
   fi
   _lumina_ensure_env_key "$env_file" "APP_DOMAIN" ":80"
   _lumina_ensure_env_key "$env_file" "CDN_DOMAIN" ":8088"
@@ -3713,7 +3732,7 @@ lumina_logs() {
   echo -e "  ${GREEN}8.${NC} caddy"
   echo -e "  ${GREEN}0.${NC} 返回"
   echo ""
-  read -r -p "> 请选择: " log_opt
+  _read_menu_choice log_opt "> 请选择: "
   log_opt="${log_opt// /}"
   case "$log_opt" in
     1) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120) ;;
@@ -3769,6 +3788,9 @@ lumina_backup() {
   backup_file="${backup_root}/lumina-${stamp}.tgz"
   db_dump="${backup_root}/database-${stamp}.sql"
   mkdir -p "$backup_root"
+  # 备份含完整 .env 与数据库 dump：目录与文件仅所有者可读写
+  chmod 700 "$backup_root" 2>/dev/null || true
+  : > "$db_dump" && chmod 600 "$db_dump" 2>/dev/null || true
 
   echo -e "\n${CYAN}>>> 正在创建 PostgreSQL 逻辑备份、本机图片和项目配置归档...${NC}"
   if (cd "$LUMINA_INSTALL_DIR" && _lumina_compose exec -T postgres sh -lc 'pg_dump -U "${POSTGRES_USER:-lumina}" -d "${POSTGRES_DB:-lumina}"' > "$db_dump"); then
@@ -3781,6 +3803,7 @@ lumina_backup() {
       -C "$LUMINA_INSTALL_DIR" "${tar_items[@]}" \
       -C "$backup_root" "database-${stamp}.sql" 2>/dev/null; then
       rm -f "$db_dump"
+      chmod 600 "$backup_file" 2>/dev/null || true
       echo -e "\n${GREEN}[成功] 备份已生成:${NC} ${backup_file}"
       echo -e "${YELLOW}说明: 已包含数据库、项目配置；如使用本机存储且有图片，也会包含 data/uploads 归档。${NC}"
     else
@@ -3804,7 +3827,7 @@ lumina_uninstall() {
   echo -e "  ${RED}2.${NC} 删除容器和 Docker 数据卷（会删除数据库；本机图片目录 data/uploads 保留，需手动删除）"
   echo -e "  ${GREEN}0.${NC} 返回"
   echo ""
-  read -r -p "> 请选择: " un_opt
+  _read_menu_choice un_opt "> 请选择: "
   un_opt="${un_opt// /}"
   case "$un_opt" in
     1)
@@ -4012,7 +4035,7 @@ nodeseek_bot_uninstall() {
   echo -e "  ${RED}2.${NC} 删除 cron 和安装目录"
   echo -e "  ${GREEN}0.${NC} 返回"
   echo ""
-  read -r -p "> 请选择: " ns_un_opt
+  _read_menu_choice ns_un_opt "> 请选择: "
   ns_un_opt="${ns_un_opt// /}"
   case "$ns_un_opt" in
     1)
@@ -4077,7 +4100,7 @@ echo -e "\n  ${GREEN}Fail2Ban 已安装${NC}"
 echo -e "  ${CYAN}SSH 监狱状态:${NC}"
 fail2ban-client status sshd 2>/dev/null | grep -E 'Status|Banned|Total' || echo -e "  ${YELLOW}SSH 监狱未激活${NC}"
 echo -e "\n  ${GREEN}1.${NC} 重新配置 SSH 防护\n  ${GREEN}2.${NC} 查看封禁列表\n  ${GREEN}0.${NC} 返回"
-read -r -p "> 请选择: " fb_opt
+_read_menu_choice fb_opt "> 请选择: "
 case "${fb_opt// /}" in
 1)
     local FB_SSH_PORT
@@ -4154,7 +4177,7 @@ echo -e "  ${GREEN}8.${NC} 手动追加内核参数     ${GREEN}9.${NC} 编辑�
 echo -e "  ${GREEN}10.${NC} 调优备份/还原"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请输入选择: " t_opt
+_read_menu_choice t_opt "> 请输入选择: "
 t_opt="${t_opt// /}"
 case "$t_opt" in
 1) _bbr_collect_dynamic_inputs; _bbr_generate_dynamic_profile ;;
@@ -4202,7 +4225,7 @@ while true; do
 clear_screen; print_divider
 print_center "[ 网络调优参数备份与还原管理 ]" "$CYAN"
 echo -e "  ${GREEN}1.${NC} 立即备份当前参数\n  ${GREEN}2.${NC} 还原历史备份\n  ${GREEN}3.${NC} 删除历史备份\n  ${GREEN}0.${NC} 返回主菜单"
-echo ""; read -r -p "> 请选择操作 [0-3]: " b_opt
+echo ""; _read_menu_choice b_opt "> 请选择操作 [0-3]: "
 b_opt="${b_opt// /}"
 case $b_opt in
 1)
@@ -4222,7 +4245,7 @@ if [ ${#backups[@]} -eq 0 ]; then echo -e "\n${RED}无备份记录。${NC}"; pau
 while true; do
 echo -e "\n${CYAN}请选择要恢复的时间点：${NC}"
 for i in "${!backups[@]}"; do echo -e "  ${GREEN}$((i+1)).${NC} 备份日期: $(stat -c "%y" "${backups[$i]}" | cut -d'.' -f1)"; done
-read -r -p "> 请输入编号 (0取消): " res_opt
+read -r -p "> 请输入编号 (0取消): " res_opt || break
 res_opt="${res_opt// /}"
 if [ "$res_opt" == "0" ]; then break; fi
 if [[ "$res_opt" =~ ^[0-9]+$ ]] && [ "$res_opt" -ge 1 ] && [ "$res_opt" -le "${#backups[@]}" ]; then
@@ -4249,7 +4272,7 @@ while true; do
 echo -e "\n${CYAN}请选择要删除的备份：${NC}"
 for i in "${!backups[@]}"; do echo -e "  ${GREEN}$((i+1)).${NC} 备份日期: $(stat -c "%y" "${backups[$i]}" | cut -d'.' -f1)"; done
 echo -e "  ${RED}99.${NC} 清空所有"
-read -r -p "> 请输入编号 (0取消): " del_opt
+read -r -p "> 请输入编号 (0取消): " del_opt || break
 del_opt="${del_opt// /}"
 if [ "$del_opt" == "0" ]; then break; fi
 if [[ "$del_opt" =~ ^[0-9]+$ ]] && [ "$del_opt" -ge 1 ] && [ "$del_opt" -le "${#backups[@]}" ]; then
@@ -4319,7 +4342,7 @@ fi
 
 echo -e "  [${GREEN}1-${#links[@]}${NC}] 输入编号：查看对应节点的二维码与完整链接"
 echo -e "  [${GREEN}B${NC}] 备份：为所有节点配置文件创建快照\n  [${GREEN}R${NC}] 还原：从历史快照恢复节点配置\n  [${GREEN}0${NC}] 返回主菜单"
-echo ""; read -r -p "> 请选择操作: " vn_opt
+echo ""; read -r -p "> 请选择操作: " vn_opt || break
 vn_opt="${vn_opt// /}"
 if [ "$vn_opt" == "0" ]; then break; fi
 if [[ "$vn_opt" =~ ^[0-9]+$ ]] && [ "$vn_opt" -ge 1 ] && [ "$vn_opt" -le "${#links[@]}" ]; then
@@ -4348,7 +4371,7 @@ shopt -s nullglob; local n_backups=("${BACKUP_DIR}"/node_backup_*); shopt -u nul
 if [ ${#n_backups[@]} -eq 0 ]; then echo -e "\n${RED}未找到节点备份记录。${NC}"; pause_for_enter; continue; fi
 echo -e "\n${CYAN}请选择要还原的备份：${NC}"
 for i in "${!n_backups[@]}"; do echo -e "  ${GREEN}$((i+1)).${NC} 备份时间: $(basename "${n_backups[$i]}" | sed 's/node_backup_//')"; done
-read -r -p "> 请输入编号 (0取消): " n_res_opt
+read -r -p "> 请输入编号 (0取消): " n_res_opt || break
 n_res_opt="${n_res_opt// /}"
 if [ "$n_res_opt" == "0" ]; then continue; fi
 if [[ "$n_res_opt" =~ ^[0-9]+$ ]] && [ "$n_res_opt" -ge 1 ] && [ "$n_res_opt" -le "${#n_backups[@]}" ]; then
@@ -4467,7 +4490,7 @@ fi
 if [ "$nodes_found" -eq 0 ]; then echo -e "${YELLOW}未检测到任何已部署的节点，无需删除。${NC}"; pause_for_enter; return; fi
 echo ""
 while true; do
-read -r -p "> 请输入要删除的节点【端口号】 (输入 0 取消): " del_port
+read -r -p "> 请输入要删除的节点【端口号】 (输入 0 取消): " del_port || return 1
 del_port="${del_port// /}"
 if [ "$del_port" == "0" ]; then return; fi
 if [ -z "$del_port" ] || ! [[ "$del_port" =~ ^[0-9]+$ ]]; then echo -e "${RED}[错误] 端口号必须是有效的纯数字！请重新输入。${NC}"; continue; fi
@@ -4532,7 +4555,7 @@ select_core() {
         echo "  │  1) Xray-core               │" >&2
         echo "  │  2) Sing-box                │" >&2
         echo "  └─────────────────────────────┘" >&2
-        read -r -p "> 请输入 [1-2, 默认 1, 0 取消]: " core_choice
+        _read_menu_choice core_choice "> 请输入 [1-2, 默认 1, 0 取消]: "
         core_choice="${core_choice// /}"
         if [ "$core_choice" == "0" ]; then return 1; fi
         [ -z "$core_choice" ] && core_choice=1
@@ -4569,7 +4592,7 @@ _ensure_ip
 echo -e "${YELLOW}>>> 小白科普：VLESS-Reality 是一种先进的伪装技术。不需要您购买域名，直接借用大厂（如苹果、微软）的域名进行伪装，安全性极高，非常适合防封锁。${NC}\n"
 
 while true; do
-read -r -p "> 请输入监听端口 (默认 50000, 0 取消): " PORT
+read -r -p "> 请输入监听端口 (默认 50000, 0 取消): " PORT || return 1
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=50000
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo -e "${RED}[错误] 端口号必须是 1 到 65535 之间的纯数字！请重新输入。${NC}"; continue; fi
@@ -4636,18 +4659,18 @@ DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
 echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
 while true; do
-read -r -p "> 选择模式 [1-2, 默认 2, 0 取消]: " cert_mode
+_read_menu_choice cert_mode "> 选择模式 [1-2, 默认 2, 0 取消]: "
 cert_mode="${cert_mode// /}"
 if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
 if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
 if [ "$cert_mode" == "1" ]; then
-    read -r -s -p "> CF API Token: " CF_Token; echo ""; [ -z "$CF_Token" ] && continue
+    read -r -s -p "> CF API Token: " CF_Token || return 1; echo ""; [ -z "$CF_Token" ] && continue
     export CF_Token="$CF_Token"; break
 else
     if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
         echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
         echo -e "${YELLOW}  ⚠️  可能开了 CF 小黄云，请关闭代理或换 API 模式。${NC}"
-        read -r -p "> 强行继续？(y/n): " force_continue
+        read -r -p "> 强行继续？(y/n): " force_continue || return 1
         [[ ! "${force_continue// /}" =~ ^[yY]$ ]] && continue
     fi
     break
@@ -4655,7 +4678,7 @@ fi
 done
 
 while true; do
-read -r -p "> 监听端口 (默认 443, 0 取消): " PORT
+read -r -p "> 监听端口 (默认 443, 0 取消): " PORT || return 1
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=443
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then continue; fi
@@ -5026,7 +5049,7 @@ echo -e "${YELLOW}>>> 小白科普：WS+TLS 是非常经典的节点协议。最
 _read_domain_or_retry DOMAIN "> 请输入域名 (输入 0 取消): " || return
 DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 while true; do
-read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT
+read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT || return 1
 WS_PORT="${WS_PORT// /}"
 if [ "$WS_PORT" == "0" ]; then return; fi; [ -z "$WS_PORT" ] && WS_PORT=443
 if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65535 ]; then continue; fi
@@ -5045,7 +5068,7 @@ echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS
 echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
 echo ""
 while true; do
-read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token
+read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token || return 1
 echo ""
 CF_Token="${CF_Token// /}"
 if [ "$CF_Token" == "0" ]; then return; fi
@@ -5097,7 +5120,7 @@ _ensure_ip
 echo -e "${YELLOW}>>> 小白科普：Shadowsocks 是经典轻量代理协议，兼容性好。这里默认使用 aes-256-gcm，支持 TCP+UDP。${NC}\n"
 
 while true; do
-read -r -p "> 监听端口 (默认 40000, 0 取消): " SS_PORT
+read -r -p "> 监听端口 (默认 40000, 0 取消): " SS_PORT || return 1
 SS_PORT="${SS_PORT// /}"
 if [ "$SS_PORT" == "0" ]; then return; fi; [ -z "$SS_PORT" ] && SS_PORT=40000
 if ! _valid_port "$SS_PORT"; then echo -e "${RED}[错误] 端口号必须是 1-65535。${NC}"; continue; fi
@@ -5113,7 +5136,7 @@ echo -e "  ${GREEN}2.${NC} chacha20-ietf-poly1305"
 echo -e "  ${GREEN}3.${NC} 2022-blake3-aes-128-gcm"
 echo -e "  ${GREEN}4.${NC} 2022-blake3-aes-256-gcm"
 while true; do
-read -r -p "> 请选择 [1-4, 默认 1, 0 取消]: " method_choice
+_read_menu_choice method_choice "> 请选择 [1-4, 默认 1, 0 取消]: "
 method_choice="${method_choice// /}"
 if [ "$method_choice" == "0" ]; then return; fi; [ -z "$method_choice" ] && method_choice=1
 case "$method_choice" in
@@ -5262,7 +5285,7 @@ echo -e "${CYAN}>>> 域名 / 证书模式${NC}"
 echo -e "  ${GREEN}1.${NC} 无域名：使用自签证书，链接使用服务器 IP，客户端需允许不安全证书 ${CYAN}[简单]${NC}"
 echo -e "  ${GREEN}2.${NC} 自有域名：申请 Let's Encrypt 证书，链接使用域名 ${CYAN}[正式]${NC}"
 while true; do
-read -r -p "> 请选择 [1-2, 默认 1, 0 取消]: " hy2_cert_profile
+_read_menu_choice hy2_cert_profile "> 请选择 [1-2, 默认 1, 0 取消]: "
 hy2_cert_profile="${hy2_cert_profile// /}"
 [ "$hy2_cert_profile" = "0" ] && return
 [ -z "$hy2_cert_profile" ] && hy2_cert_profile=1
@@ -5287,7 +5310,7 @@ case "$hy2_cert_profile" in
 esac
 done
 while true; do
-read -r -p "> 监听端口 (默认 8443, 0 取消): " HY2_PORT
+read -r -p "> 监听端口 (默认 8443, 0 取消): " HY2_PORT || return 1
 HY2_PORT="${HY2_PORT// /}"
 if [ "$HY2_PORT" == "0" ]; then return; fi; [ -z "$HY2_PORT" ] && HY2_PORT=8443
 if ! _valid_port "$HY2_PORT"; then continue; fi
@@ -5299,12 +5322,12 @@ echo -e "\n${CYAN}>>> HY2 端口跳跃${NC}"
 echo -e "  ${GREEN}1.${NC} 不启用，只使用主端口 ${HY2_PORT}"
 echo -e "  ${GREEN}2.${NC} 启用 UDP 端口跳跃（额外端口转发到主端口）"
 HY2_HOP_ENABLED=0; HY2_HOP_RANGE=""
-read -r -p "> 请选择 [1-2, 默认 1, 0 取消]: " hop_choice
+_read_menu_choice hop_choice "> 请选择 [1-2, 默认 1, 0 取消]: "
 hop_choice="${hop_choice// /}"
 [ "$hop_choice" = "0" ] && return
 if [ "$hop_choice" = "2" ]; then
   while true; do
-    read -r -p "> 跳跃端口范围，例如 20000-20100 (0 取消): " HY2_HOP_RANGE
+    read -r -p "> 跳跃端口范围，例如 20000-20100 (0 取消): " HY2_HOP_RANGE || return 1
     HY2_HOP_RANGE="${HY2_HOP_RANGE// /}"
     [ "$HY2_HOP_RANGE" = "0" ] && return
     if [[ "$HY2_HOP_RANGE" =~ ^([0-9]+)-([0-9]+)$ ]]; then
@@ -5326,7 +5349,7 @@ if [ "$hy2_cert_profile" = "2" ]; then
   echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
   echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请"
   while true; do
-  read -r -p "> 选择模式 [1-2, 默认 2, 0 取消]: " cert_mode
+  _read_menu_choice cert_mode "> 选择模式 [1-2, 默认 2, 0 取消]: "
   cert_mode="${cert_mode// /}"
   if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
   if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
@@ -5337,7 +5360,7 @@ if [ "$hy2_cert_profile" = "2" ]; then
   echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
   echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
   echo ""
-  read -r -s -p "> 请输入您的 Cloudflare API Token: " CF_Token
+  read -r -s -p "> 请输入您的 Cloudflare API Token: " CF_Token || return 1
   echo ""
   if [ -z "$CF_Token" ]; then continue; fi
   export CF_Token="$CF_Token"; break
@@ -5346,7 +5369,7 @@ if [ "$hy2_cert_profile" = "2" ]; then
   echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
   echo -e "${YELLOW}  ⚠️  可能开启了 Cloudflare 小黄云，Hysteria2 无法通过 CDN 代理！${NC}"
   echo -e "${YELLOW}  请去 CF 控制台关闭该域名的代理（改为灰色云朵），或者换用 API 模式申请证书。${NC}"
-  read -r -p "> 是否强行继续？(y/n, 默认 n): " force_continue
+  read -r -p "> 是否强行继续？(y/n, 默认 n): " force_continue || return 1
   if [[ ! "${force_continue// /}" =~ ^[yY]$ ]]; then continue; fi
   fi
   break
@@ -5620,7 +5643,7 @@ echo -e "${YELLOW}>>> 优先使用 iptables 内核转发（性能更好），无
 echo -e "${YELLOW}>>> 请确认目标地址可信，避免把服务器变成开放转发入口。${NC}\n"
 
 while true; do
-read -r -p "> 本机监听端口 (0 取消): " listen_port
+read -r -p "> 本机监听端口 (0 取消): " listen_port || return 1
 listen_port="${listen_port// /}"
 [ "$listen_port" = "0" ] && return
 if ! _valid_port "$listen_port"; then echo -e "${RED}[错误] 端口号必须是 1-65535。${NC}"; continue; fi
@@ -5634,7 +5657,7 @@ if [ -z "$target_host" ]; then echo -e "${RED}[错误] 目标地址不能为空�
 if [[ ! "$target_host" =~ ^[A-Za-z0-9._:-]+$ ]]; then echo -e "${RED}[错误] 目标地址仅允许域名/IP 字符。${NC}"; pause_for_enter; return; fi
 
 while true; do
-read -r -p "> 目标端口 (0 取消): " target_port
+read -r -p "> 目标端口 (0 取消): " target_port || return 1
 target_port="${target_port// /}"
 [ "$target_port" = "0" ] && return
 _valid_port "$target_port" && break
@@ -5646,7 +5669,7 @@ echo -e "  ${GREEN}1.${NC} TCP"
 echo -e "  ${GREEN}2.${NC} UDP"
 echo -e "  ${GREEN}3.${NC} TCP + UDP"
 while true; do
-read -r -p "> 请选择 [1-3, 默认 1, 0 取消]: " proto_choice
+_read_menu_choice proto_choice "> 请选择 [1-3, 默认 1, 0 取消]: "
 proto_choice="${proto_choice// /}"
 [ "$proto_choice" = "0" ] && return
 [ -z "$proto_choice" ] && proto_choice=1
@@ -5761,18 +5784,18 @@ fi
 install_dependencies
 echo -e "  ${GREEN}1.${NC} 查看当前防火墙状态与已放行端口\n  ${GREEN}2.${NC} 放行指定新端口 (TCP/UDP)\n  ${GREEN}3.${NC} 删除某个端口规则\n  ${GREEN}4.${NC} 开启防火墙\n  ${GREEN}5.${NC} 彻底关闭防火墙\n  ${GREEN}6.${NC} 一键仅放行正在使用的端口 (关闭所有未占用)\n  ${GREEN}7.${NC} 一键打开所有入站端口\n  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请选择操作 [0-7]: " ufw_opt
+_read_menu_choice ufw_opt "> 请选择操作 [0-7]: "
 ufw_opt="${ufw_opt// /}"
 case $ufw_opt in
 1) echo -e "\n${CYAN}>>> 防火墙状态：${NC}"; ufw status numbered || echo -e "${RED}[错误] 读取状态失败。${NC}"; pause_for_enter ;;
 2)
-read -r -p "> 请输入要放行的端口号: " port
+read -r -p "> 请输入要放行的端口号: " port || return 1
 port="${port// /}"
 if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then ufw allow "$port"; echo -e "${GREEN}[成功] 端口 $port 已成功添加放行规则！${NC}"; ufw reload > /dev/null 2>&1; else echo -e "${RED}[错误] 端口号输入无效！${NC}"; fi
 pause_for_enter ;;
 3)
 echo -e "\n${CYAN}>>> 当前规则列表：${NC}"; ufw status numbered; echo ""
-read -r -p "> 请输入要删除的【规则编号】: " rule_num
+read -r -p "> 请输入要删除的【规则编号】: " rule_num || return 1
 rule_num="${rule_num// /}"
 if [[ "$rule_num" =~ ^[0-9]+$ ]]; then
   if ufw --force delete "$rule_num"; then
@@ -5903,7 +5926,7 @@ echo -e "  ───────────────────────
 echo -e "  ${GREEN} 0.${NC} 返回主菜单"
 echo ""
 echo -ne "  ${YELLOW}[提示] 直接输入序号安装，输入 d+序号 卸载 (如 d6 卸载 iftop)${NC}\n"
-read -r -p "> 请输入选择: " t_opt
+_read_menu_choice t_opt "> 请输入选择: "
 t_opt="${t_opt// /}"
 
 if [[ "$t_opt" =~ ^[dD]([0-9]+)$ ]]; then
@@ -6544,7 +6567,7 @@ echo -e "  ${GREEN}6.${NC} 开启密码登录（兼容模式）"
 echo -e "  ${GREEN}7.${NC} 关闭密码登录（仅密钥模式）"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请输入编号: " sk_opt
+_read_menu_choice sk_opt "> 请输入编号: "
 sk_opt="${sk_opt// /}"
 
 case $sk_opt in
@@ -6586,7 +6609,7 @@ case $sk_opt in
   pause_for_enter ;;
 2)
   echo ""
-  read -r -p "> 请粘贴您的公钥（ssh-ed25519 或 ssh-rsa 开头）: " _pubkey
+  read -r -p "> 请粘贴您的公钥（ssh-ed25519 或 ssh-rsa 开头）: " _pubkey || return 1
   if [[ -z "$_pubkey" ]] || [[ ! "$_pubkey" =~ ^ssh-(rsa|ed25519|ecdsa) ]]; then
     echo -e "${RED}[错误] 无效的公钥格式。${NC}"; sleep 2; continue
   fi
@@ -6602,7 +6625,7 @@ case $sk_opt in
   echo -e "${GREEN}[成功] 公钥已导入并启用密钥登录。${NC}"; pause_for_enter ;;
 3)
   echo ""
-  read -r -p "> 请输入 GitHub 用户名: " _ghuser
+  read -r -p "> 请输入 GitHub 用户名: " _ghuser || return 1
   [ -z "$_ghuser" ] && continue
   local _ghkeys
   _ghkeys=$(curl -fsSL --max-time 10 "https://github.com/${_ghuser}.keys" 2>/dev/null)
@@ -6621,7 +6644,7 @@ case $sk_opt in
   echo -e "${GREEN}[成功] 已从 GitHub(${_ghuser}) 导入公钥。${NC}"; pause_for_enter ;;
 4)
   echo ""
-  read -r -p "> 请输入公钥 URL: " _kurl
+  read -r -p "> 请输入公钥 URL: " _kurl || return 1
   [ -z "$_kurl" ] && continue
   if [[ "$_kurl" != https://* ]]; then echo -e "${RED}[错误] 只接受 https:// 的 URL。${NC}"; sleep 2; continue; fi
   local _remote_keys
@@ -6680,11 +6703,11 @@ echo -e "  ${GREEN}4.${NC} 格式化分区（ext4/xfs/vfat）"
 echo -e "  ${GREEN}5.${NC} 检查分区状态（fsck）"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请输入编号: " dm_opt
+_read_menu_choice dm_opt "> 请输入编号: "
 dm_opt="${dm_opt// /}"
 case $dm_opt in
 1)
-  read -r -p "> 请输入要挂载的分区名（如 sdb1）: " _part
+  read -r -p "> 请输入要挂载的分区名（如 sdb1）: " _part || return 1
   [ -z "$_part" ] && continue
   local _dev="/dev/$_part" _mnt="/mnt/$_part"
   if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
@@ -6705,7 +6728,7 @@ case $dm_opt in
   fi
   pause_for_enter ;;
 2)
-  read -r -p "> 请输入要卸载的分区名（如 sdb1）: " _part
+  read -r -p "> 请输入要卸载的分区名（如 sdb1）: " _part || return 1
   [ -z "$_part" ] && continue
   if ! mount | grep -qwF "/dev/$_part"; then echo -e "${YELLOW}分区未挂载！${NC}"; sleep 2; continue; fi
   umount "/dev/$_part" && echo -e "${GREEN}[成功] 已卸载 /dev/$_part${NC}" || echo -e "${RED}卸载失败！${NC}"
@@ -6715,19 +6738,19 @@ case $dm_opt in
   df -h | grep -v "tmpfs\|udev\|overlay"
   pause_for_enter ;;
 4)
-  read -r -p "> 请输入要格式化的分区名（如 sdb1）: " _part
+  read -r -p "> 请输入要格式化的分区名（如 sdb1）: " _part || return 1
   [ -z "$_part" ] && continue
   if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
   if lsblk -no MOUNTPOINT "/dev/$_part" 2>/dev/null | grep -q '/'; then echo -e "${RED}分区已挂载，请先卸载！${NC}"; sleep 2; continue; fi
   echo -e "  选择文件系统: ${GREEN}1.${NC}ext4  ${GREEN}2.${NC}xfs  ${GREEN}3.${NC}vfat"
-  read -r -p "> 请选择: " _fsidx
+  _read_menu_choice _fsidx "> 请选择: "
   case $_fsidx in 1) _fst=ext4 ;; 2) _fst=xfs ;; 3) _fst=vfat ;; *) continue ;; esac
-  read -r -p "> 确认格式化 /dev/$_part 为 $_fst？(y/N): " _yesno
+  read -r -p "> 确认格式化 /dev/$_part 为 $_fst？(y/N): " _yesno || return 1
   [[ "$_yesno" =~ ^[yY]$ ]] || continue
   "mkfs.$_fst" "/dev/$_part" && echo -e "${GREEN}[成功] 格式化完成！${NC}" || echo -e "${RED}格式化失败！${NC}"
   pause_for_enter ;;
 5)
-  read -r -p "> 请输入要检查的分区名（如 sdb1）: " _part
+  read -r -p "> 请输入要检查的分区名（如 sdb1）: " _part || return 1
   [ -z "$_part" ] && continue
   if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
   if lsblk -no MOUNTPOINT "/dev/$_part" 2>/dev/null | grep -q '/'; then echo -e "${RED}分区已挂载，请先卸载再检查！${NC}"; sleep 2; continue; fi
@@ -6771,7 +6794,7 @@ echo -e "  ${GREEN}3.${NC} 编辑全部任务（nano）"
 echo -e "  ${GREEN}4.${NC} 立即执行指定任务"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"
 echo ""
-read -r -p "> 请输入编号: " ct_opt
+_read_menu_choice ct_opt "> 请输入编号: "
 ct_opt="${ct_opt// /}"
 case $ct_opt in
 1)
@@ -6780,8 +6803,8 @@ case $ct_opt in
   echo -e "  示例: 0 2 * * 1 /root/backup.sh  （每周一 02:00 执行）"
   echo -e "  示例: */30 * * * * /usr/bin/curl -s url  （每30分钟）"
   echo ""
-  read -r -p "> 请输入 Cron 时间表达式（分 时 日 月 周）: " _cron_time
-  read -r -p "> 请输入命令或脚本路径: " _cron_cmd
+  read -r -p "> 请输入 Cron 时间表达式（分 时 日 月 周）: " _cron_time || return 1
+  read -r -p "> 请输入命令或脚本路径: " _cron_cmd || return 1
   [ -z "$_cron_time" ] || [ -z "$_cron_cmd" ] && continue
   if (crontab -l 2>/dev/null; echo "$_cron_time $_cron_cmd") | crontab -; then
     echo -e "${GREEN}[成功] 定时任务已添加！${NC}"
@@ -6794,7 +6817,7 @@ case $ct_opt in
   while IFS= read -r line; do _lines+=("$line"); done <<< "$_tasks"
   [ ${#_lines[@]} -eq 0 ] && echo -e "${YELLOW}暂无任务可删除。${NC}" && sleep 2 && continue
   echo ""
-  read -r -p "> 请输入要删除的任务编号: " _del_idx
+  read -r -p "> 请输入要删除的任务编号: " _del_idx || return 1
   [[ "$_del_idx" =~ ^[0-9]+$ ]] || continue
   local _del_no=$((_del_idx-1))
   [ $_del_no -lt 0 ] || [ $_del_no -ge ${#_lines[@]} ] && echo -e "${RED}编号超出范围！${NC}" && sleep 2 && continue
@@ -6811,7 +6834,7 @@ case $ct_opt in
   local _exec_lines=()
   while IFS= read -r line; do _exec_lines+=("$line"); done <<< "$_tasks"
   [ ${#_exec_lines[@]} -eq 0 ] && echo -e "${YELLOW}暂无任务。${NC}" && sleep 2 && continue
-  read -r -p "> 请输入要立即执行的任务编号: " _exec_idx
+  read -r -p "> 请输入要立即执行的任务编号: " _exec_idx || return 1
   [[ "$_exec_idx" =~ ^[0-9]+$ ]] || continue
   local _exec_no=$((_exec_idx-1))
   [ $_exec_no -lt 0 ] || [ $_exec_no -ge ${#_exec_lines[@]} ] && echo -e "${RED}编号超出范围！${NC}" && sleep 2 && continue
@@ -6858,7 +6881,7 @@ fi
 echo -e "  ${GREEN}1.${NC} 从 GitHub 更新到最新版本"
 echo -e "  ${RED}2.${NC} 彻底卸载 VPSBox 及所有残留"
 echo -e "  ${GREEN}0.${NC} 返回主菜单"; echo ""
-read -r -p "> 请选择: " ms_opt
+_read_menu_choice ms_opt "> 请选择: "
 ms_opt="${ms_opt// /}"
 case $ms_opt in
 1)
@@ -6958,7 +6981,7 @@ _read_menu_choice() {
   read -r -p "$__prompt" __choice
   __choice="${__choice// /}"
   if [ -z "$__choice" ] && [ ! -t 0 ]; then
-    echo -e "\n${RED}[提示] 检测到输入流异常，请使用 ${GREEN}bash <(curl -sL ${SCRIPT_URL})${NC} 方式运行。${NC}"
+    echo -e "\n${RED}[提示] 检测到输入流异常，请使用 ${GREEN}bash <(curl -fsSL ${SCRIPT_URL})${NC} 方式运行。${NC}"
     exit 1
   fi
   printf -v "$__var" '%s' "$__choice"
