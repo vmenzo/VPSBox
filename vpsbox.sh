@@ -135,14 +135,33 @@ CURRENT_TZ=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}')
 
 # IP 懒加载：启动不检测，首次使用时自动获取（避免无 IPv6 机器卡死）
 SERVER_IPV4=""; SERVER_IPV6=""; SERVER_IP=""; _IP_DONE=0
+# IP 格式校验：公网 IP 查询的返回值可能是错误页或空文本，先校验再使用。
+_is_ipv4() {
+  local ip="$1" o x
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -ra o <<< "$ip"
+  for x in "${o[@]}"; do [ "$((10#$x))" -gt 255 ] && return 1; done
+  return 0
+}
+_is_ipv6() {
+  local ip="$1"
+  [[ "$ip" == *:* ]] || return 1
+  [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+  return 0
+}
+
 _ensure_ip() {
     [ "$_IP_DONE" -eq 1 ] && return
     _IP_DONE=1
     SERVER_IPV4=$(curl -fsS4 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null)
+    _is_ipv4 "$SERVER_IPV4" || SERVER_IPV4=""
     [ -z "$SERVER_IPV4" ] && SERVER_IPV4=$(curl -fsS4 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+    _is_ipv4 "$SERVER_IPV4" || SERVER_IPV4=""
     [ -z "$SERVER_IPV4" ] && SERVER_IPV4="未分配"
     SERVER_IPV6=$(curl -fsS6 --connect-timeout 2 --max-time 3 ifconfig.me 2>/dev/null)
+    _is_ipv6 "$SERVER_IPV6" || SERVER_IPV6=""
     [ -z "$SERVER_IPV6" ] && SERVER_IPV6=$(curl -fsS6 --connect-timeout 1 --max-time 2 ip.sb 2>/dev/null)
+    _is_ipv6 "$SERVER_IPV6" || SERVER_IPV6=""
     [ -z "$SERVER_IPV6" ] && SERVER_IPV6="未分配"
     if [ "$SERVER_IPV4" != "未分配" ]; then SERVER_IP="$SERVER_IPV4"
     elif [ "$SERVER_IPV6" != "未分配" ]; then SERVER_IP="[${SERVER_IPV6}]"
@@ -282,6 +301,15 @@ _svc_enable() {
   elif command -v chkconfig >/dev/null 2>&1; then chkconfig "$1" on
   else return 1; fi
 }
+_svc_disable_now() {
+  local systemctl_bin
+  if systemctl_bin=$(_systemctl_bin); then "$systemctl_bin" disable --now "$1" && return 0; fi
+  if command -v service >/dev/null 2>&1; then service "$1" stop >/dev/null 2>&1; fi
+  if command -v rc-update >/dev/null 2>&1; then rc-update del "$1" default
+  elif command -v update-rc.d >/dev/null 2>&1; then update-rc.d "$1" disable
+  elif command -v chkconfig >/dev/null 2>&1; then chkconfig "$1" off
+  else return 1; fi
+}
 _svc_is_active() {
   local systemctl_bin
   if systemctl_bin=$(_systemctl_bin); then timeout 5 "$systemctl_bin" is-active --quiet "$1" 2>/dev/null && return 0; fi
@@ -295,7 +323,10 @@ _svc_main_pid() {
     pid=$(timeout 3 "$systemctl_bin" show -p MainPID "$1" 2>/dev/null | cut -d= -f2)
     [ -n "$pid" ] && [ "$pid" != "0" ] && { echo "$pid"; return 0; }
   fi
-  pgrep -f "$1" 2>/dev/null | head -1
+  pid=$(pgrep -x "$1" 2>/dev/null | head -1)
+  [ -n "$pid" ] && { echo "$pid"; return 0; }
+  pid=$(pgrep -f "(^|/)${1}([[:space:]]|$)" 2>/dev/null | head -1)
+  [ -n "$pid" ] && echo "$pid"
 }
 
 _sshd_config_test() {
@@ -310,7 +341,7 @@ _collect_public_listen_entries() {
       n=split(local, a, ":")
       port=a[n]
       if (port !~ /^[0-9]+$/) next
-      if (local ~ /127\.0\.0\.1:/) next
+      if (local ~ /127\.[0-9]+\.[0-9]+\.[0-9]+:/) next
       if (local ~ /\[::1\]:/) next
       if (local ~ /localhost:/) next
       key=proto":"port
@@ -326,7 +357,24 @@ _restart_ssh_service_safely() {
     return 1
   fi
   [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，SSH 服务已安排后台短暂重启，请留意新配置是否生效。${NC}"
-  ( sleep 1; _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1 ) &
+  ( sleep 1; _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1; sleep 3
+    _vpsbox_ssh_port=$(_sshd_effective_value Port 2>/dev/null || true)
+    [ -z "$_vpsbox_ssh_port" ] && _vpsbox_ssh_port=22
+    if ! _port_is_listening "$_vpsbox_ssh_port" tcp; then
+      echo -e "${RED}[错误] SSH 重启后未在端口 ${_vpsbox_ssh_port} 监听，请立即检查服务状态（systemctl status sshd）！${NC}"
+    fi ) &
+}
+
+# SSH 生效配置查询：优先用 sshd -T（权威），回退到主文件 + drop-in 递归 grep（与 change_ssh_port 同源取法）。
+_sshd_effective_value() {
+  local key="$1" val
+  if command -v sshd >/dev/null 2>&1; then
+    val=$(sshd -T 2>/dev/null | awk -v k="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')" 'tolower($1) == k {print $2; exit}')
+    [ -n "$val" ] && { echo "$val"; return 0; }
+  fi
+  val=$(grep -REhi "^[[:space:]]*${key}[[:space:]]+" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | head -1)
+  [ -n "$val" ] && { echo "$val"; return 0; }
+  return 1
 }
 
 _set_sshd_option() {
@@ -1004,21 +1052,13 @@ _trusted_script_url() {
   [[ "$url" == https://* ]] || return 1
   host="${url#https://}"; host="${host%%/*}"; host="${host%%:*}"
   case "$host" in
-    raw.githubusercontent.com|github.com|linuxmirrors.cn|sing-box.app|chatgpt.com|claude.ai|Check.Place|check.place|gitlab.com) return 0 ;;
+    raw.githubusercontent.com|github.com|linuxmirrors.cn|sing-box.app|chatgpt.com|claude.ai|Check.Place|check.place|gitlab.com|get.acme.sh) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-_verify_sha256_if_set() {
-  local file="$1" expected="${2:-}" actual
-  [ -z "$expected" ] && return 0
-  command -v sha256sum >/dev/null 2>&1 || return 1
-  actual=$(sha256sum "$file" | awk '{print $1}')
-  [ "$actual" = "$expected" ]
-}
-
 _run_remote_bash() {
-  local url="$1" tmp rc first_line expected_sha256="${VPSBOX_REMOTE_SCRIPT_SHA256:-}"
+  local url="$1" tmp rc first_line
   shift
   _trusted_script_url "$url" || { echo -e "${RED}[错误] 拒绝从非 HTTPS 或未受信任主机执行脚本: $url${NC}"; return 1; }
   tmp=$(mktemp) || return 1
@@ -1042,9 +1082,6 @@ _run_remote_bash() {
     rm -f "$tmp"
     echo -e "${RED}[错误] 下载内容不像可执行 shell 脚本，已拒绝执行: $url${NC}"
     return 1
-  fi
-  if ! _verify_sha256_if_set "$tmp" "$expected_sha256"; then
-    rm -f "$tmp"; echo -e "${RED}[错误] 远程脚本 SHA256 校验失败。${NC}"; return 1
   fi
   bash "$tmp" "$@"
   rc=$?
@@ -1227,7 +1264,7 @@ elif command -v apk &>/dev/null; then
   apk cache clean
   rm -rf /var/cache/apk/*
   find /tmp -mindepth 1 -mtime +1 -delete 2>/dev/null
-  find /var/log -type f -exec truncate -s 0 {} \; 2>/dev/null
+  find /var/log -type f -mtime +7 -exec truncate -s 0 {} \; 2>/dev/null
 elif command -v pacman &>/dev/null; then
   local pacman_orphans
   pacman_orphans=$(pacman -Qdtq 2>/dev/null || true)
@@ -1247,7 +1284,7 @@ elif command -v zypper &>/dev/null; then
   journalctl --vacuum-size=500M 2>/dev/null
 elif command -v opkg &>/dev/null; then
   find /tmp -mindepth 1 -mtime +1 -delete 2>/dev/null
-  find /var/log -type f -exec truncate -s 0 {} \; 2>/dev/null
+  find /var/log -type f -mtime +7 -exec truncate -s 0 {} \; 2>/dev/null
 else
   echo -e "\n${RED}[错误] 未识别的包管理器！${NC}"; pause_for_enter; return
 fi
@@ -1362,7 +1399,11 @@ else
   _set_sshd_option Port "$cur_port" >/dev/null 2>&1 || true
   _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1 || true
   [ "$ufw_rule_added" -eq 1 ] && ufw --force delete allow "${new_port}/tcp" >/dev/null 2>&1 || true
-  echo -e "\n${RED}[错误] SSH 未能在新端口监听，已恢复原端口 ${cur_port}。${NC}"
+  if _wait_for_port_listen "$cur_port" "tcp" 10; then
+    echo -e "\n${RED}[错误] SSH 未能在新端口监听，已恢复原端口 ${cur_port} 并验证恢复监听。${NC}"
+  else
+    echo -e "\n${RED}[错误] SSH 未能在新端口监听，且回滚后原端口 ${cur_port} 也未恢复监听！请立即检查 SSH 服务（systemctl status sshd），切勿断开当前连接。${NC}"
+  fi
 fi
 pause_for_enter
 }
@@ -1456,8 +1497,12 @@ case $swap_opt in
   while true; do
     read -r -p "> 请输入 Swap 大小 (MB，如 1024 / 2048): " input_size
     input_size="${input_size// /}"
-    [[ "$input_size" =~ ^[0-9]+$ ]] && break
-    echo -e "${RED}[错误] 请输入纯数字。${NC}"
+    [[ "$input_size" =~ ^[0-9]+$ ]] || { echo -e "${RED}[错误] 请输入纯数字。${NC}"; continue; }
+    if [ "$((10#$input_size))" -gt 32768 ]; then echo -e "${RED}[错误] Swap 大小不能超过 32768MB（32G）。${NC}"; continue; fi
+    local _disk_avail
+    _disk_avail=$(df -BM --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+    if [ -n "$_disk_avail" ] && [ "$((10#$input_size))" -ge "$((10#$_disk_avail))" ]; then echo -e "${RED}[错误] 磁盘剩余空间不足（剩余 ${_disk_avail}MB），请改小 Swap 大小。${NC}"; continue; fi
+    break
   done
   if ! confirm_action "设置 ${input_size}MB Swap"; then continue; fi
   echo -e "\n${CYAN}>>> 正在释放旧 Swap...${NC}"
@@ -1563,6 +1608,16 @@ _dns_write_plain_resolv_conf() {
 
   chattr -i /etc/resolv.conf 2>/dev/null || true
   if [ -L /etc/resolv.conf ]; then
+    local _link_target _link_backup
+    _link_target=$(readlink /etc/resolv.conf)
+    _link_backup="/etc/resolv.conf.vpsbox.bak.$(date +%Y%m%d_%H%M%S)"
+    printf '%s\n' "$_link_target" > "$_link_backup" 2>/dev/null || true
+    echo -e "${YELLOW}[警告] /etc/resolv.conf 当前是指向 ${_link_target} 的符号链接（systemd-resolved），直接写入会破坏解析链。链接目标已备份到 ${_link_backup}。${NC}"
+    if ! confirm_action "替换符号链接为普通 resolv.conf" "n"; then
+      rm -f "$resolv_tmp"
+      echo -e "${YELLOW}已取消 DNS 写入。${NC}"
+      return 1
+    fi
     rm -f /etc/resolv.conf || {
       rm -f "$resolv_tmp"
       echo -e "${RED}[错误] 无法替换 /etc/resolv.conf 符号链接。${NC}"
@@ -1812,12 +1867,46 @@ _bbr_safe_wget() {
     local target="$url"
     [[ -n "$prefix" ]] && target="${prefix}${url#https://}"
     echo -e "  ${CYAN}>>> 下载: $(basename "$dest")...${NC}"
-    if wget --no-check-certificate -qT 15 -t 2 -O "$dest" "$target" 2>/dev/null; then
+    if wget -qT 15 -t 2 -O "$dest" "$target" 2>/dev/null && [ -s "$dest" ]; then
       echo -e "  ${GREEN}下载成功${NC}"; return 0
     fi
+    rm -f "$dest"
     [[ "${BBR_IS_CN:-0}" -eq 1 ]] && echo -e "  ${YELLOW}镜像失败，切换下一个...${NC}"
   done
   echo -e "  ${RED}[错误] 所有下载节点均失败！${NC}"; return 1
+}
+
+# 内核包完整性校验：先校验文件非空与包结构；再尝试从同一 Release 目录取 SHA256SUMS 校验，
+# 有校验文件且不匹配时直接失败；取不到校验文件时告警后继续（不静默跳过）。
+_bbr_verify_downloaded_file() {
+  local file="$1" url="$2" base sums_tmp sums_name expected actual
+  [ -s "$file" ] || { echo -e "  ${RED}[错误] 下载文件为空: $(basename "$file")${NC}"; return 1; }
+  case "$file" in
+    *.deb) dpkg-deb --info "$file" >/dev/null 2>&1 || { echo -e "  ${RED}[错误] 内核包结构校验失败: $(basename "$file")${NC}"; return 1; } ;;
+    *.rpm) rpm -qp "$file" >/dev/null 2>&1 || { echo -e "  ${RED}[错误] 内核包结构校验失败: $(basename "$file")${NC}"; return 1; } ;;
+  esac
+  base="${url%/*}"
+  sums_tmp=$(mktemp) || return 1
+  for sums_name in SHA256SUMS sha256sums.txt SHA256SUMS.txt; do
+    if curl -fsSL --connect-timeout 10 --max-time 30 "${base}/${sums_name}" -o "$sums_tmp" 2>/dev/null && [ -s "$sums_tmp" ]; then
+      expected=$(awk -v f="$(basename "$file")" '{ gsub(/^\*/, "", $2); if ($2 == f) { print $1; exit } }' "$sums_tmp")
+      rm -f "$sums_tmp"
+      if [ -n "$expected" ]; then
+        actual=$(sha256sum "$file" | awk '{print $1}')
+        if [ "$actual" = "$expected" ]; then
+          echo -e "  ${GREEN}SHA256 校验通过: $(basename "$file")${NC}"
+          return 0
+        fi
+        echo -e "  ${RED}[错误] SHA256 校验失败: $(basename "$file")，已拒绝安装。${NC}"
+        return 1
+      fi
+      echo -e "  ${YELLOW}[警告] 发布页校验文件不含 $(basename "$file")，跳过 SHA256 校验。${NC}"
+      return 0
+    fi
+  done
+  rm -f "$sums_tmp"
+  echo -e "  ${YELLOW}[警告] 未找到发布页 SHA256 校验文件，仅校验文件非空与包结构。${NC}"
+  return 0
 }
 
 _bbr_github_asset() {
@@ -1882,8 +1971,8 @@ _bbr_install_kernel() {
   local wdir="/tmp/bbr_install_$$"
   mkdir -p "$wdir" && cd "$wdir" || return 1
   if [[ "$BBR_OS_TYPE" == "CentOS" ]]; then
-    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "kernel-headers.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
-    _bbr_safe_wget "$img_url" "kernel-image.rpm" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
+    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "kernel-headers.rpm" && _bbr_verify_downloaded_file "kernel-headers.rpm" "$head_url" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
+    _bbr_safe_wget "$img_url" "kernel-image.rpm" && _bbr_verify_downloaded_file "kernel-image.rpm" "$img_url" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
     echo -e "  ${CYAN}>>> 执行 YUM 安装...${NC}"
     if [[ -n "$head_url" ]]; then
       yum install -y kernel-image.rpm kernel-headers.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
@@ -1891,8 +1980,8 @@ _bbr_install_kernel() {
       yum install -y kernel-image.rpm || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核安装失败。${NC}"; return 1; }
     fi
   elif [[ "$BBR_OS_TYPE" == "Debian" ]]; then
-    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "linux-headers.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
-    _bbr_safe_wget "$img_url" "linux-image.deb" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
+    [[ -n "$head_url" ]] && { _bbr_safe_wget "$head_url" "linux-headers.deb" && _bbr_verify_downloaded_file "linux-headers.deb" "$head_url" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }; }
+    _bbr_safe_wget "$img_url" "linux-image.deb" && _bbr_verify_downloaded_file "linux-image.deb" "$img_url" || { cd /tmp || return 1; rm -rf "$wdir"; return 1; }
     echo -e "  ${CYAN}>>> 执行 DPKG 安装...${NC}"
     dpkg -i linux-image.deb || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核镜像安装失败。${NC}"; return 1; }
     [[ -n "$head_url" ]] && dpkg -i linux-headers.deb || [[ -z "$head_url" ]] || { cd /tmp || return 1; rm -rf "$wdir"; echo -e "  ${RED}[错误] 内核头文件安装失败。${NC}"; return 1; }
@@ -1909,7 +1998,10 @@ _bbr_apply_sysctl_file() {
   if sysctl -p "$target_conf" >/dev/null 2>&1; then
     return 0
   fi
-  sysctl --system >/dev/null 2>&1
+  echo -e "  ${YELLOW}[警告] sysctl 应用目标文件失败: $target_conf，尝试回退应用全部系统配置...${NC}" >&2
+  sysctl --system >/dev/null 2>&1 || true
+  echo -e "  ${YELLOW}[警告] 目标文件未生效，请手动检查 $target_conf。${NC}" >&2
+  return 1
 }
 
 _bbr_psabi_level() {
@@ -1940,6 +2032,10 @@ PY
 
 _bbr_clamp() {
   local val="$1" minv="$2" maxv="$3"
+  [[ "$val" =~ ^[0-9]+$ ]] || val=0
+  [[ "$minv" =~ ^[0-9]+$ ]] || minv=0
+  [[ "$maxv" =~ ^[0-9]+$ ]] || maxv=0
+  val=$((10#$val)); minv=$((10#$minv)); maxv=$((10#$maxv))
   (( val < minv )) && val=$minv
   (( val > maxv )) && val=$maxv
   echo "$val"
@@ -2079,8 +2175,6 @@ _tcp_profile_collect_inputs() {
   eval "${prefix}_MEMORY_MB=$current_val"
 }
 
-manage_bbr() { :; }
-
 _bbr_collect_dynamic_inputs() {
   _tcp_profile_collect_inputs "BBR_TUNE" "bbr" "0"
 }
@@ -2095,8 +2189,17 @@ _bbr_generate_dynamic_profile() {
   [[ -z "$need_backup" || "$need_backup" =~ ^[yY]$ ]] && backup_config_silently
 
   local local_bw="$BBR_TUNE_LOCAL_BW" vps_bw="$BBR_TUNE_VPS_BW" latency="$BBR_TUNE_LATENCY" mem_mb="$BBR_TUNE_MEMORY_MB" cc="$BBR_TUNE_CC" ecn="$BBR_TUNE_ECN" ramp="$BBR_TUNE_RAMP"
+
+  # 激进参数提示：默认画像含 OOM 时直接重启整机、内核 panic 后自动重启等参数，须用户确认才启用。
+  local _panic_choice=""
+  echo -e "  ${YELLOW}[提示] 默认画像包含激进参数：内存耗尽时直接重启整机（vm.panic_on_oom=1）、内核 panic 后自动重启（kernel.panic=1），另含 SysRq 开启与 core_pattern 设置。适用于追求极致可用性的场景，但可能在内存不足时丢失未保存数据。${NC}"
+  read -r -p "> 是否启用这些激进参数？(y/n, 默认 n): " _panic_choice
+  local _profile_panic="0"
+  [[ "${_panic_choice// /}" =~ ^[yY]$ ]] && _profile_panic="1"
+
+  export LOCAL_BW="$local_bw" VPS_BW="$vps_bw" LATENCY="$latency" MEM_MB="$mem_mb" RAMP="$ramp" CC="$cc" ECN="$ecn" PROFILE_PANIC="$_profile_panic"
   local json
-  json=$(python3 - <<'PY'
+  if ! json=$(python3 - <<'PY'
 import json, math, os
 
 def clamp(x, lo, hi):
@@ -2236,6 +2339,11 @@ base = {
     'net.ipv4.conf.all.arp_ignore': 1,
     'net.ipv4.conf.default.arp_ignore': 1,
 }
+
+# 激进参数（OOM/内核 panic 后重启、SysRq、core_pattern）默认不启用，须用户确认才加入画像。
+if os.environ.get('PROFILE_PANIC', '0') != '1':
+    for _k in ('kernel.panic', 'kernel.sysrq', 'kernel.core_pattern', 'vm.panic_on_oom'):
+        base.pop(_k, None)
 
 if latency <= 120:
     mode = '低延迟画像'
@@ -2481,10 +2589,17 @@ else:
 
 print(json.dumps(data, ensure_ascii=False))
 PY
-  )
+  ); then
+    echo -e "  ${RED}[错误] TCP 画像参数生成失败，请检查输入后重试。${NC}"
+    return 1
+  fi
+  if [[ -z "$json" ]]; then
+    echo -e "  ${RED}[错误] TCP 画像参数生成结果为空。${NC}"
+    return 1
+  fi
 
   export PROFILE_JSON="$json"
-  python3 - <<'PY'
+  if ! python3 - <<'PY'
 import json, os, pathlib
 conf = pathlib.Path('/etc/sysctl.d/99-vpsbox-bbr.conf')
 limits = pathlib.Path('/etc/security/limits.d/99-vpsbox-tcp.conf')
@@ -2501,6 +2616,10 @@ conf.write_text('\n'.join(lines) + '\n')
 limits.write_text('* soft nofile 1048576\n* hard nofile 1048576\n')
 systemd.write_text('DefaultLimitNOFILE=1048576\nDefaultLimitNPROC=65535\n')
 PY
+  then
+    echo -e "  ${RED}[错误] TCP 画像配置文件写入失败。${NC}"
+    return 1
+  fi
 
   _svc_daemon_reload >/dev/null 2>&1 || true
   local mode
@@ -3097,6 +3216,10 @@ fi
 
 if [ "$_country" = "CN" ]; then
   mkdir -p /etc/docker
+  if [ -f /etc/docker/daemon.json ]; then
+    cp -p /etc/docker/daemon.json "/etc/docker/daemon.json.vpsbox.bak.$(date +%Y%m%d_%H%M%S)"
+    echo -e "  ${CYAN}[已备份] 原 daemon.json 已备份到 /etc/docker/daemon.json.vpsbox.bak.*${NC}"
+  fi
   cat > /etc/docker/daemon.json <<'EOF'
 {
   "registry-mirrors": [
@@ -3242,8 +3365,8 @@ POSTGRES_DB=picvault
 APP_HOST_PORT=${port}
 APP_BIND_ADDRESS=0.0.0.0
 PICVAULT_BACKUP_DIR=/app/backups
-ALLOW_REGISTER=true
-VITE_ALLOW_REGISTER=true
+ALLOW_REGISTER=false
+VITE_ALLOW_REGISTER=false
 APP_PUBLIC_URL=${public_url}
 
 TRUST_PROXY=loopback, linklocal, uniquelocal
@@ -3549,32 +3672,15 @@ _nodeseek_bot_require_apt() {
 }
 
 _nodeseek_bot_run_installer() {
-  local mode="${1:-install}" tmp_script="" script_path=""
+  local mode="${1:-install}"
   _nodeseek_bot_require_apt || return 1
 
   if [ -f "$NODESEEK_BOT_INSTALL_DIR/install_vps.sh" ]; then
-    script_path="$NODESEEK_BOT_INSTALL_DIR/install_vps.sh"
-  else
-    tmp_script=$(mktemp) || return 1
-    if ! curl -fsSL --connect-timeout 10 --max-time 120 "$NODESEEK_BOT_INSTALL_SCRIPT_URL" -o "$tmp_script"; then
-      rm -f "$tmp_script"
-      echo -e "${RED}[错误] NodeSeek Bot 安装脚本下载失败。${NC}"
-      return 1
-    fi
-    script_path="$tmp_script"
+    REPO_URL="$NODESEEK_BOT_REPO_URL" INSTALL_DIR="$NODESEEK_BOT_INSTALL_DIR" bash "$NODESEEK_BOT_INSTALL_DIR/install_vps.sh" "$mode"
+    return $?
   fi
 
-  if ! grep -q "NodeSeek" "$script_path" || ! grep -q "install_vps" "$script_path"; then
-    [ -n "$tmp_script" ] && rm -f "$tmp_script"
-    echo -e "${RED}[错误] NodeSeek Bot 安装脚本内容异常，已拒绝执行。${NC}"
-    return 1
-  fi
-
-  REPO_URL="$NODESEEK_BOT_REPO_URL" INSTALL_DIR="$NODESEEK_BOT_INSTALL_DIR" bash "$script_path" "$mode"
-
-  local rc=$?
-  [ -n "$tmp_script" ] && rm -f "$tmp_script"
-  return "$rc"
+  REPO_URL="$NODESEEK_BOT_REPO_URL" INSTALL_DIR="$NODESEEK_BOT_INSTALL_DIR" _run_remote_bash "$NODESEEK_BOT_INSTALL_SCRIPT_URL" "$mode"
 }
 
 _nodeseek_bot_show_info() {
@@ -3785,7 +3891,7 @@ read -r -p "> 请选择: " fb_opt
 case "${fb_opt// /}" in
 1)
     local FB_SSH_PORT
-    FB_SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+    FB_SSH_PORT=$(_sshd_effective_value Port 2>/dev/null || true)
     [ -z "$FB_SSH_PORT" ] && FB_SSH_PORT=22
     cat > /etc/fail2ban/jail.local << FBEOL
 [DEFAULT]
@@ -3820,7 +3926,7 @@ elif command -v zypper &>/dev/null; then zypper install -y fail2ban >/dev/null 2
 else echo -e "${RED}[错误] 未识别的包管理器。${NC}"; pause_for_enter; return; fi
 if ! command -v fail2ban-client &>/dev/null; then echo -e "${RED}[错误] 安装失败。${NC}"; pause_for_enter; return; fi
 local SSH_PORT
-SSH_PORT=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+SSH_PORT=$(_sshd_effective_value Port 2>/dev/null || true)
 [ -z "$SSH_PORT" ] && SSH_PORT=22
 cat > /etc/fail2ban/jail.local << FBEOL
 [DEFAULT]
@@ -3870,11 +3976,22 @@ case "$t_opt" in
 7) _bbr_ipv6_on ;;
 8) _bbr_sysctl_merge ;;
 9) _bbr_sysctl_edit ;;
-10) tcp_tuning_backup_menu ;;
+10) manage_backup ;;
 0) return ;;
 *) echo -e "\n${RED}[错误] 无效输入。${NC}"; sleep 1 ;;
 esac
 done
+}
+
+# 只保留最近 10 份调优备份，避免无限累积。
+_prune_old_backups() {
+  local _all _old
+  [ -n "${BACKUP_DIR:-}" ] || return 0
+  _all=($(ls -1t "${BACKUP_DIR}"/backup_*.conf 2>/dev/null))
+  [ "${#_all[@]}" -gt 10 ] || return 0
+  for _old in "${_all[@]:10}"; do
+    rm -f "$_old" "${_old}.managed"
+  done
 }
 
 backup_config_silently() {
@@ -3884,6 +4001,7 @@ local backup="${BACKUP_DIR}/backup_${ts}.conf"
 if sysctl -a 2>/dev/null | grep -E '^(net\.(core|ipv4|ipv6)\.)' > "$backup"; then
   [ -f "$CUSTOM_CONF" ] && cp -p "$CUSTOM_CONF" "${backup}.managed"
   echo -e "${GREEN}[成功] 参数及 VPSBox 配置已自动备份。${NC}"
+  _prune_old_backups
 else
   rm -f "$backup"; echo -e "${YELLOW}[警告] 自动备份异常或不支持当前系统。${NC}"
 fi
@@ -3905,6 +4023,7 @@ local backup="${BACKUP_DIR}/backup_${ts}.conf"
 if sysctl -a 2>/dev/null | grep -E '^(net\.(core|ipv4|ipv6)\.)' > "$backup"; then
   [ -f "$CUSTOM_CONF" ] && cp -p "$CUSTOM_CONF" "${backup}.managed"
   echo -e "\n${GREEN}[成功] 网络参数及 VPSBox 配置备份成功！${NC}"
+  _prune_old_backups
 else rm -f "$backup"; echo -e "\n${RED}[错误] 备份执行失败。${NC}"; fi
 pause_for_enter ;;
 2)
@@ -3925,7 +4044,7 @@ if sysctl -p "$selected" > /dev/null 2>&1; then
   echo -e "\n${GREEN}[成功] 参数及对应持久化配置已还原！${NC}"
 else
   [ -n "$current_copy" ] && cp -p "$current_copy" "$CUSTOM_CONF"
-  echo -e "\n${RED}[错误] 还原参数失败，持久化配置未改变。${NC}"
+  echo -e "\n${RED}[错误] 还原参数失败（sysctl 应用中途出错，备份中靠前的参数可能已部分应用）。持久化配置已恢复，但当前生效参数可能与备份不一致，请检查输出后重试。${NC}"
 fi
 rm -f "$current_copy"
 pause_for_enter; break
@@ -3964,17 +4083,9 @@ clear_screen; print_divider
 print_center "[ IP 质量检测与流媒体解锁 ]" "$CYAN"
 install_dependencies
 echo -e "${CYAN}>>> 正在启动权威检测引擎...${NC}\n"
-local CHECK_TMP; CHECK_TMP=$(mktemp) || { echo -e "${RED}[错误] 无法创建临时文件。${NC}"; pause_for_enter; return; }
 local check_ret=2
-if _trusted_script_url "https://Check.Place" && curl -fsSL --connect-timeout 10 --max-time 60 https://Check.Place -o "$CHECK_TMP"; then
-    if grep -Eq '^#!/|(^|[[:space:]])(bash|sh)[[:space:]]' "$CHECK_TMP"; then
-        bash "$CHECK_TMP"
-        check_ret=$?
-    else
-        echo -e "${RED}[错误] 检测脚本内容校验失败，已拒绝执行可疑返回内容。${NC}"
-    fi
-fi
-rm -f "$CHECK_TMP"
+_run_remote_bash "https://Check.Place"
+check_ret=$?
 if [ $check_ret -ne 0 ] && [ $check_ret -ne 1 ]; then
     echo -e "\n${RED}[错误] 网络不通、下载失败或检测脚本不可用，请检查服务器出墙连通性。${NC}"
 fi
@@ -4294,15 +4405,20 @@ if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
 ensure_xray_core || { pause_for_enter; return; }
 KEYS=$(xray x25519)
-PRI=$(echo "$KEYS" | awk -F': ' '/PrivateKey/{print $2}')
-PUB=$(echo "$KEYS" | awk -F': ' '/Password|PublicKey/{print $2}' | head -n1)
-NEW_INBOUND='{"listen":"0.0.0.0","port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":"'$SNI_DOMAIN':443","serverNames":["'$SNI_DOMAIN'"],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
+PRI=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /private[ _]?key/ {print $2; exit}')
+PUB=$(echo "$KEYS" | awk -F': *' 'tolower($0) ~ /public[ _]?key|password/ {print $2; exit}')
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$PORT',"protocol":"vless","settings":{"clients":[{"id":"'$UUID'","flow":"xtls-rprx-vision"}],"decryption":"none"},"streamSettings":{"network":"tcp","security":"reality","realitySettings":{"show":false,"dest":$(_json_escape "${SNI_DOMAIN}:443"),"serverNames":[$(_json_escape "$SNI_DOMAIN")],"privateKey":"'$PRI'","shortIds":["'$SHORT_ID'"]}}}'
 else
 CORE_NAME="Sing-box"
 ensure_singbox_core || { pause_for_enter; return; }
 SB_BIN=$(command -v sing-box || echo "/usr/local/bin/sing-box"); KEYS=$("$SB_BIN" generate reality-keypair)
 PRI=$(echo "$KEYS" | awk -F'[: ]+' '/Private/{print $NF}'); PUB=$(echo "$KEYS" | awk -F'[: ]+' '/Public/{print $NF}')
-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"'$SNI_DOMAIN'","reality":{"enabled":true,"handshake":{"server":"'$SNI_DOMAIN'","server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"uuid":"'$UUID'","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":$(_json_escape "$SNI_DOMAIN"),"reality":{"enabled":true,"handshake":{"server":$(_json_escape "$SNI_DOMAIN"),"server_port":443},"private_key":"'$PRI'","short_id":["'$SHORT_ID'"]}}}'
+fi
+
+if [[ -z "$PRI" || -z "$PUB" || ! "$PRI" =~ ^[A-Za-z0-9_-]{43}$ || ! "$PUB" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+  echo -e "\n${RED}[错误] Reality 密钥解析失败（当前核心输出格式无法识别），请检查 xray/sing-box 版本后重试。${NC}"
+  pause_for_enter; return
 fi
 
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#Reality-${PORT}"
@@ -4359,6 +4475,7 @@ done
 
 if ! confirm_action "开始部署 AnyTLS 并申请证书"; then pause_for_enter; return; fi
 acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
+unset CF_Token
 if [ ! -f "$CERT_DIR/fullchain.pem" ] || [ ! -f "$CERT_DIR/privkey.pem" ]; then
     echo -e "\n${RED}[错误] 证书文件缺失: $CERT_DIR/${NC}"; ls -la "$CERT_DIR/" 2>/dev/null; pause_for_enter; return
 fi
@@ -4367,7 +4484,7 @@ CORE_NAME="Sing-box"
 ensure_singbox_core || { pause_for_enter; return; }
 
 PASSWORD=$(openssl rand -base64 12 | tr -d '+/=' | head -c 16)
-NEW_INBOUND='{"type":"anytls","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+NEW_INBOUND='{"type":"anytls","listen":"0.0.0.0","listen_port":'$PORT',"users":[{"password":"'$PASSWORD'"}],"tls":{"enabled":true,"server_name":$(_json_escape "$DOMAIN"),"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
@@ -4433,6 +4550,7 @@ acquire_cert() {
         if [ "$cert_mode" == "1" ]; then
             export CF_Token="$CF_Token"
             /root/.acme.sh/acme.sh --issue -d "$DOMAIN" --dns dns_cf -k ec-256; CERT_RES=$?
+            unset CF_Token
         else
             if ss -tlnp | grep -q "\b:80\b"; then
                 echo -e "\n${RED}[错误] 检测到 80 端口已被占用，独立模式不会再强行停服务或杀进程。${NC}"
@@ -4747,6 +4865,7 @@ done
 cert_mode=1
 if ! confirm_action "开始部署 WS+TLS 节点并申请证书"; then pause_for_enter; return; fi
 acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
+unset CF_Token
 UUID=$(cat /proc/sys/kernel/random/uuid); WSPATH="/$(openssl rand -hex 4)"
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
@@ -4755,7 +4874,7 @@ NEW_INBOUND='{"port":'$WS_PORT',"protocol":"vless","settings":{"clients":[{"id":
 else
 CORE_NAME="Sing-box"
 ensure_singbox_core || { pause_for_enter; return; }
-NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":"'$DOMAIN'","certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
+NEW_INBOUND='{"type":"vless","listen":"0.0.0.0","listen_port":'$WS_PORT',"users":[{"uuid":"'$UUID'"}],"tls":{"enabled":true,"server_name":$(_json_escape "$DOMAIN"),"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"},"transport":{"type":"ws","path":"'$WSPATH'"}}'
 fi
 
 LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DOMAIN}&alpn=h2%2Chttp%2F1.1&type=ws&host=${DOMAIN}&path=${WSPATH}#WS-TLS-${WS_PORT}"
@@ -5045,20 +5164,21 @@ if [ "$hy2_cert_profile" = "2" ]; then
   done
   if ! confirm_action "开始部署 Hysteria2 节点并申请证书"; then pause_for_enter; return; fi
   acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
+  unset CF_Token
 else
   if ! confirm_action "开始部署无域名 Hysteria2 节点"; then pause_for_enter; return; fi
   install_dependencies
   _ensure_hy2_self_signed_cert "$HY2_SNI" || { echo -e "\n${RED}[错误] 自签证书生成失败。${NC}"; pause_for_enter; return; }
 fi
-HY2_PASS=$(openssl rand -hex 8)
+HY2_PASS=$(openssl rand -hex 16)
 if [ "$core_choice" == "1" ]; then
 CORE_NAME="Xray"
 ensure_xray_core || { pause_for_enter; return; }
-NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","level":0,"email":"vpsbox@hy2"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"serverName":"'$HY2_SNI'","alpn":["h3"],"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2}}}'
+NEW_INBOUND='{"listen":"0.0.0.0","port":'$HY2_PORT',"protocol":"hysteria","settings":{"version":2,"clients":[{"auth":"'$HY2_PASS'","level":0,"email":"vpsbox@hy2"}]},"streamSettings":{"network":"hysteria","security":"tls","tlsSettings":{"serverName":$(_json_escape "$HY2_SNI"),"alpn":["h3"],"certificates":[{"certificateFile":"'$CERT_DIR'/fullchain.pem","keyFile":"'$CERT_DIR'/privkey.pem"}]},"hysteriaSettings":{"version":2}}}'
 else
 CORE_NAME="Sing-box"
 ensure_singbox_core || { pause_for_enter; return; }
-NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":"'$HY2_SNI'","alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
+NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":$(_json_escape "$HY2_SNI"),"alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
 LINK="hysteria2://${HY2_PASS}@${HY2_LINK_HOST}:${HY2_PORT}/?sni=${HY2_SNI}&alpn=h3&insecure=${HY2_INSECURE}"
@@ -5101,10 +5221,8 @@ print_center "[ Cloudflare WARP 一键解锁 ]" "$CYAN"
 if ! confirm_action "部署 Cloudflare WARP"; then pause_for_enter; return; fi
 install_dependencies
 echo -e "\n${CYAN}>>> 正在启动 WARP 脚本...${NC}\n${YELLOW}   脚本下载与安装可能需要 1-2 分钟，请耐心等待${NC}"
-if wget -P /tmp https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh -O /tmp/menu.sh 2>/dev/null; then
-    bash /tmp/menu.sh || true
-else
-    echo -e "\n${RED}[错误] WARP 脚本下载失败，请检查网络。${NC}"
+if ! _run_remote_bash https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh; then
+    echo -e "\n${RED}[错误] WARP 脚本下载或执行失败，请检查网络。${NC}"
 fi
 pause_for_enter
 }
@@ -5229,7 +5347,8 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOFUNIT
   _svc_daemon_reload >/dev/null 2>&1 || true
-  systemctl enable --now "$unit_name" >/dev/null 2>&1
+  _svc_enable "$unit_name" >/dev/null 2>&1 || true
+  _svc_start "$unit_name" >/dev/null 2>&1 || true
 }
 
 _write_forward_state() {
@@ -5279,7 +5398,7 @@ _remove_port_forward_state() {
   if [ "${MODE:-}" = "iptables" ]; then
     _remove_iptables_forward "$LISTEN_PORT" "$PROTO" "$TARGET_IP" "$TARGET_PORT"
   else
-    [ -n "${UNIT:-}" ] && systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+    [ -n "${UNIT:-}" ] && _svc_disable_now "$UNIT" >/dev/null 2>&1 || true
     [ -n "${LISTEN_PORT:-}" ] && [ -n "${PROTO:-}" ] && rm -f "$(_forward_unit_file "$LISTEN_PORT" "$PROTO")"
   fi
   _ufw_delete_if_added "${LISTEN_PORT:-}" "${PROTO:-}" "${UFW_ADDED:-0}"
@@ -5517,7 +5636,7 @@ ufw reload > /dev/null 2>&1
 echo -e "\n${GREEN}[成功] 防火墙已重新配置！仅放行正在使用的端口。${NC}"
 pause_for_enter ;;
 7)
-if ! confirm_action "打开所有入站端口 (⚠️ 安全风险)"; then continue; fi
+if ! confirm_action "打开所有入站端口 (⚠️ 安全风险)" "n"; then continue; fi
 ufw --force reset > /dev/null 2>&1
 ufw default allow incoming > /dev/null 2>&1
 ufw default allow outgoing > /dev/null 2>&1
@@ -5950,7 +6069,10 @@ _set_codex_auth_api_key_without_jq() {
     return $?
   fi
   if grep -q '"OPENAI_API_KEY"[[:space:]]*:' "$file" 2>/dev/null; then
-    sed -E 's|^([[:space:]]*"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*")[^"]*(".*)$|\1'"$escaped"'\2|' "$file" > "$tmp" && mv "$tmp" "$file"
+    # sed 替换中 & 代表整个匹配、| 是分隔符，须先转义，否则含 & 或 | 的 Key 会被写坏。
+    local escaped_sed
+    escaped_sed=$(printf '%s' "$escaped" | sed -e 's/[&|\\]/\\&/g')
+    sed -E 's|^([[:space:]]*"OPENAI_API_KEY"[[:space:]]*:[[:space:]]*")[^"]*(".*)$|\1'"$escaped_sed"'\2|' "$file" > "$tmp" && mv "$tmp" "$file"
     return $?
   fi
   awk -v value="$escaped" '
@@ -6207,13 +6329,15 @@ while true; do
 clear_screen; print_divider
 print_center "[ SSH 密钥登录管理 ]" "$CYAN"
 
-local _pubkey_status _paswd_status
-if grep -iq "^PubkeyAuthentication yes" /etc/ssh/sshd_config 2>/dev/null; then
+local _pubkey_status _paswd_status _pubkey_val _paswd_val
+_pubkey_val=$(_sshd_effective_value PubkeyAuthentication 2>/dev/null || true)
+if [[ "${_pubkey_val,,}" == "yes" ]]; then
   _pubkey_status="${GREEN}已启用${NC}"
 else
   _pubkey_status="${RED}未启用${NC}"
 fi
-if grep -iq "^PasswordAuthentication yes" /etc/ssh/sshd_config 2>/dev/null; then
+_paswd_val=$(_sshd_effective_value PasswordAuthentication 2>/dev/null || true)
+if [[ "${_paswd_val,,}" == "yes" ]]; then
   _paswd_status="${GREEN}允许${NC}"
 else
   _paswd_status="${YELLOW}禁用${NC}"
@@ -6309,6 +6433,7 @@ case $sk_opt in
   echo ""
   read -r -p "> 请输入公钥 URL: " _kurl
   [ -z "$_kurl" ] && continue
+  if [[ "$_kurl" != https://* ]]; then echo -e "${RED}[错误] 只接受 https:// 的 URL。${NC}"; sleep 2; continue; fi
   local _remote_keys
   _remote_keys=$(curl -fsSL --max-time 10 "$_kurl" 2>/dev/null)
   if [ -z "$_remote_keys" ]; then
@@ -6372,8 +6497,8 @@ case $dm_opt in
   read -r -p "> 请输入要挂载的分区名（如 sdb1）: " _part
   [ -z "$_part" ] && continue
   local _dev="/dev/$_part" _mnt="/mnt/$_part"
-  if ! lsblk -no NAME | grep -qw "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
-  if mount | grep -qw "$_dev"; then echo -e "${YELLOW}分区已挂载！${NC}"; sleep 2; continue; fi
+  if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
+  if mount | grep -qwF "$_dev"; then echo -e "${YELLOW}分区已挂载！${NC}"; sleep 2; continue; fi
   local _uuid _fstype
   _uuid=$(blkid -s UUID -o value "$_dev" 2>/dev/null)
   _fstype=$(blkid -s TYPE -o value "$_dev" 2>/dev/null)
@@ -6381,7 +6506,7 @@ case $dm_opt in
   [ -z "$_fstype" ] && echo -e "${RED}无法获取文件系统类型！${NC}" && sleep 2 && continue
   mkdir -p "$_mnt"
   if mount "$_dev" "$_mnt"; then
-    if ! grep -qE "UUID=$_uuid|[[:space:]]${_mnt}[[:space:]]" /etc/fstab; then
+    if ! grep -qF "UUID=${_uuid} " /etc/fstab && ! grep -qF " ${_mnt} " /etc/fstab; then
       echo "UUID=$_uuid $_mnt $_fstype defaults,nofail 0 2" >> /etc/fstab
     fi
     echo -e "${GREEN}[成功] 已挂载 $_dev → $_mnt（已写入 fstab）${NC}"
@@ -6392,7 +6517,7 @@ case $dm_opt in
 2)
   read -r -p "> 请输入要卸载的分区名（如 sdb1）: " _part
   [ -z "$_part" ] && continue
-  if ! mount | grep -qw "/dev/$_part"; then echo -e "${YELLOW}分区未挂载！${NC}"; sleep 2; continue; fi
+  if ! mount | grep -qwF "/dev/$_part"; then echo -e "${YELLOW}分区未挂载！${NC}"; sleep 2; continue; fi
   umount "/dev/$_part" && echo -e "${GREEN}[成功] 已卸载 /dev/$_part${NC}" || echo -e "${RED}卸载失败！${NC}"
   pause_for_enter ;;
 3)
@@ -6402,7 +6527,7 @@ case $dm_opt in
 4)
   read -r -p "> 请输入要格式化的分区名（如 sdb1）: " _part
   [ -z "$_part" ] && continue
-  if ! lsblk -no NAME | grep -qw "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
+  if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
   if lsblk -no MOUNTPOINT "/dev/$_part" 2>/dev/null | grep -q '/'; then echo -e "${RED}分区已挂载，请先卸载！${NC}"; sleep 2; continue; fi
   echo -e "  选择文件系统: ${GREEN}1.${NC}ext4  ${GREEN}2.${NC}xfs  ${GREEN}3.${NC}vfat"
   read -r -p "> 请选择: " _fsidx
@@ -6414,7 +6539,8 @@ case $dm_opt in
 5)
   read -r -p "> 请输入要检查的分区名（如 sdb1）: " _part
   [ -z "$_part" ] && continue
-  if ! lsblk -no NAME | grep -qw "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
+  if ! lsblk -no NAME | grep -qwF "$_part"; then echo -e "${RED}分区不存在！${NC}"; sleep 2; continue; fi
+  if lsblk -no MOUNTPOINT "/dev/$_part" 2>/dev/null | grep -q '/'; then echo -e "${RED}分区已挂载，请先卸载再检查！${NC}"; sleep 2; continue; fi
   fsck "/dev/$_part"
   pause_for_enter ;;
 0) break ;;
@@ -6467,8 +6593,12 @@ case $ct_opt in
   read -r -p "> 请输入 Cron 时间表达式（分 时 日 月 周）: " _cron_time
   read -r -p "> 请输入命令或脚本路径: " _cron_cmd
   [ -z "$_cron_time" ] || [ -z "$_cron_cmd" ] && continue
-  (crontab -l 2>/dev/null; echo "$_cron_time $_cron_cmd") | crontab -
-  echo -e "${GREEN}[成功] 定时任务已添加！${NC}"; pause_for_enter ;;
+  if (crontab -l 2>/dev/null; echo "$_cron_time $_cron_cmd") | crontab -; then
+    echo -e "${GREEN}[成功] 定时任务已添加！${NC}"
+  else
+    echo -e "${RED}[错误] 定时任务添加失败，请检查 Cron 表达式是否合法。${NC}"
+  fi
+  pause_for_enter ;;
 2)
   local _lines=()
   while IFS= read -r line; do _lines+=("$line"); done <<< "$_tasks"
@@ -6479,8 +6609,12 @@ case $ct_opt in
   local _del_no=$((_del_idx-1))
   [ $_del_no -lt 0 ] || [ $_del_no -ge ${#_lines[@]} ] && echo -e "${RED}编号超出范围！${NC}" && sleep 2 && continue
   local _del_line="${_lines[$_del_no]}"
-  (crontab -l 2>/dev/null | grep -Fxv "$_del_line") | crontab -
-  echo -e "${GREEN}[成功] 已删除: $_del_line${NC}"; pause_for_enter ;;
+  if crontab -l 2>/dev/null | awk -v del="$((_del_no+1))" 'BEGIN{n=0} /^#/ || /^$/ {print; next} {n++; if (n != del) print}' | crontab -; then
+    echo -e "${GREEN}[成功] 已删除: $_del_line${NC}"
+  else
+    echo -e "${RED}[错误] 定时任务删除失败。${NC}"
+  fi
+  pause_for_enter ;;
 3)
   _pkg_install nano 2>/dev/null; crontab -e; pause_for_enter ;;
 4)
@@ -6545,7 +6679,7 @@ update_tmp=$(mktemp) || { echo -e "${RED}[错误] 无法创建更新临时文件
 curl -fsSL --connect-timeout 5 --max-time 30 "https://raw.githubusercontent.com/vmenzo/VPSBox/main/vpsbox.sh" -o "$update_tmp"
 if [ -s "$update_tmp" ] && \
    grep -qE '^VPSBOX_VERSION="v?[0-9]+([.][0-9]+){1,3}"' "$update_tmp" && \
-   bash -n "$update_tmp" && _verify_sha256_if_set "$update_tmp" "${VPSBOX_UPDATE_SHA256:-}"; then
+   bash -n "$update_tmp"; then
 install -m 755 "$update_tmp" "$SHORTCUT_PATH"; rm -f "$update_tmp"
 echo -e "\n${GREEN}[成功] 已更新！${NC}"
 echo -e "${YELLOW}即将重启脚本...${NC}"; sleep 2; exec "$SHORTCUT_PATH"
