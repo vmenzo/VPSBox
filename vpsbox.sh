@@ -1059,58 +1059,82 @@ persist_node_runtime() {
 
 remove_node_runtime() {
   local core_name="$1" port="$2" protocol="${3:-}"
-  local meta_file fragment_file node_dir backup_fragment node_link node_protocol node_ufw
+  local meta_file node_dir node_link node_protocol node_ufw
+  local -a fragment_files=() backup_fragments=()
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
-  # protocol 指定时只匹配端口+协议的记录；不指定时按端口匹配（兼容旧调用）
+  # protocol 指定时只匹配端口+协议的记录；不指定时按端口匹配全部记录（清理旧版残留的同端口重复片段）
   if [ -n "$protocol" ]; then
     node_link=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
     node_protocol="$protocol"
     node_ufw=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .ufw // ""' "$meta_file" 2>/dev/null | head -n 1)
-    fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .file' "$meta_file" 2>/dev/null | head -n 1)
+    local _frag_from_meta
+    _frag_from_meta=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .file' "$meta_file" 2>/dev/null | head -n 1)
+    if [ -n "$_frag_from_meta" ] && [ -f "$_frag_from_meta" ]; then
+      fragment_files=("$_frag_from_meta")
+    else
+      local _slug; _slug=$(_sanitize_filename_component "$protocol"); [ -z "$_slug" ] && _slug="node"
+      [ -f "$node_dir/${port}-${_slug}.json" ] && fragment_files=("$node_dir/${port}-${_slug}.json")
+    fi
   else
     node_link=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
     node_protocol=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
     node_ufw=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .ufw // ""' "$meta_file" 2>/dev/null | sort -u | paste -sd, -)
-    fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .file' "$meta_file" 2>/dev/null | head -n 1)
-  fi
-  if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
+    # 收集该端口的全部片段文件：元数据记录 + 磁盘 glob，去重
+    local _f
+    while IFS= read -r _f; do
+      [ -n "$_f" ] && [ -f "$_f" ] && fragment_files+=("$_f")
+    done < <(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .file' "$meta_file" 2>/dev/null)
     shopt -s nullglob
-    local matches=()
-    if [ -n "$protocol" ]; then
-      local _slug; _slug=$(_sanitize_filename_component "$protocol"); [ -z "$_slug" ] && _slug="node"
-      [ -f "$node_dir/${port}-${_slug}.json" ] && matches=("$node_dir/${port}-${_slug}.json")
-    else
-      matches=("$node_dir/${port}-"*.json)
-      [ -f "$node_dir/${port}.json" ] && matches+=("$node_dir/${port}.json")
-    fi
+    local _g
+    for _g in "$node_dir/${port}-"*.json "$node_dir/${port}.json"; do
+      [ -f "$_g" ] || continue
+      local _seen=0 _e
+      for _e in "${fragment_files[@]}"; do [ "$_e" = "$_g" ] && { _seen=1; break; }; done
+      [ "$_seen" -eq 0 ] && fragment_files+=("$_g")
+    done
     shopt -u nullglob
-    if [ ${#matches[@]} -eq 0 ]; then
-      echo -e "${RED}[错误] 未找到端口 $port 对应的节点片段文件。${NC}"
+  fi
+  if [ ${#fragment_files[@]} -eq 0 ]; then
+    echo -e "${RED}[错误] 未找到端口 $port 对应的节点片段文件。${NC}"
+    return 1
+  fi
+  # 先备份全部片段，任一步失败时整体回滚
+  local _frag _b
+  for _frag in "${fragment_files[@]}"; do
+    if ! mv "$_frag" "${_frag}.bak.$$"; then
+      for _b in "${backup_fragments[@]}"; do
+        mv "$_b" "${_b%.bak.$$}" >/dev/null 2>&1 || true
+      done
       return 1
     fi
-    fragment_file="${matches[0]}"
-  fi
-  backup_fragment="${fragment_file}.bak.$$"
-  mv "$fragment_file" "$backup_fragment" || return 1
+    backup_fragments+=("${_frag}.bak.$$")
+  done
   if ! rebuild_core_config "$core_name"; then
-    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    for _b in "${backup_fragments[@]}"; do
+      mv "$_b" "${_b%.bak.$$}" >/dev/null 2>&1 || true
+    done
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     echo -e "${RED}[错误] 重新生成 ${core_name} 主配置失败，已自动回滚节点片段。${NC}"
     return 1
   fi
   if ! _reload_core_without_disconnect "$core_name"; then
-    mv "$backup_fragment" "$fragment_file" >/dev/null 2>&1 || true
+    for _b in "${backup_fragments[@]}"; do
+      mv "$_b" "${_b%.bak.$$}" >/dev/null 2>&1 || true
+    done
     rebuild_core_config "$core_name" >/dev/null 2>&1 || true
     _reload_core_without_disconnect "$core_name" >/dev/null 2>&1 || true
     echo -e "${RED}[错误] ${core_name} 延迟重启安排失败，已自动回滚节点片段并恢复旧配置。${NC}"
     return 1
   fi
-  rm -f "$backup_fragment"
-  if [ "$node_protocol" = "hysteria2" ]; then
-    _remove_hy2_port_hopping "$port" "$node_link" || true
-  fi
+  rm -f "${backup_fragments[@]}"
+  # Hy2 跳跃规则：逐个处理本次删除的 hysteria2 片段（用各自的链接提取 mport 范围）
+  local _hp _hl
+  while IFS=$'\t' read -r _hp _hl; do
+    [ "$_hp" = "hysteria2" ] || continue
+    _remove_hy2_port_hopping "$port" "$_hl" || true
+  done < <(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and ($vpsbox_meta_protocol == "" or .protocol == $vpsbox_meta_protocol)) | "\(.protocol // "")\t\(.link // "")"' "$meta_file" 2>/dev/null)
   # 清理本次部署新增的 UFW 规则（按元数据里的 ufw 记录；仍有其他节点用时保留）
   if [ -n "$node_ufw" ]; then
     local -a _ufw_protos
@@ -4807,8 +4831,15 @@ cert_mode="${cert_mode// /}"
 if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=2
 if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
 if [ "$cert_mode" == "1" ]; then
-    read -r -s -p "> CF API Token: " CF_Token || return 1; echo ""; [ -z "$CF_Token" ] && continue
-    export CF_Token="$CF_Token"; break
+    while true; do
+    read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token || return 1
+    echo ""
+    CF_Token="${CF_Token// /}"
+    if [ "$CF_Token" == "0" ]; then return; fi
+    if [ -z "$CF_Token" ]; then continue; fi
+    export CF_Token="$CF_Token"
+    break
+    done
     break
 else
     if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
@@ -5180,7 +5211,7 @@ _cert_referenced_by_nodes() {
     [ -d "$node_dir" ] || continue
     for frag in "$node_dir"/*.json; do
       [ -f "$frag" ] || continue
-      grep -qF "$cert_dir" "$frag" 2>/dev/null || continue
+      grep -qF "$cert_dir/" "$frag" 2>/dev/null || continue
       local p pr
       p=$(jq -r --arg f "$frag" '.[] | select(.file == $f) | .port // ""' "$meta_file" 2>/dev/null | head -n 1)
       pr=$(jq -r --arg f "$frag" '.[] | select(.file == $f) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
@@ -5634,10 +5665,15 @@ if [ "$hy2_cert_profile" = "2" ]; then
   echo -e "  ${GREEN}3.${NC} 点击「创建令牌」→ 选择「编辑区域 DNS」模板"
   echo -e "  ${GREEN}4.${NC} 权限选「区域 - DNS - 编辑」，区域选你的域名，创建后复制 Token"
   echo ""
-  read -r -s -p "> 请输入您的 Cloudflare API Token: " CF_Token || return 1
+  while true; do
+  read -r -s -p "> 请输入您的 Cloudflare API Token (输入 0 取消): " CF_Token || return 1
   echo ""
+  CF_Token="${CF_Token// /}"
+  if [ "$CF_Token" == "0" ]; then return; fi
   if [ -z "$CF_Token" ]; then continue; fi
-  export CF_Token="$CF_Token"; break
+  export CF_Token="$CF_Token"
+  break
+  done
   break
   elif [ "$cert_mode" == "2" ]; then
   if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
