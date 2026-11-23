@@ -57,6 +57,7 @@ echo -e "\n${RED}[错误] 权限不足！请使用 root 用户运行。${NC}\n"
 exit 1
 fi
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR" 2>/dev/null || true
 mkdir -p "$NODE_RUNTIME_STATE_DIR" "$PORT_FORWARD_STATE_DIR"
 # 退出时清理临时测试配置文件
 trap 'rm -f /tmp/vpsbox_test_config.json' EXIT
@@ -165,6 +166,22 @@ _ensure_ip() {
     if [ "$SERVER_IPV4" != "未分配" ]; then SERVER_IP="$SERVER_IPV4"
     elif [ "$SERVER_IPV6" != "未分配" ]; then SERVER_IP="[${SERVER_IPV6}]"
     else SERVER_IP="未分配"; fi
+}
+
+# 校验用于生成分享链接的 host 必须是合法 IP。
+# IP 检测失败时 SERVER_IP 为"未分配"，直接生成链接会得到打不开的坏链接，
+# 必须在生成链接前报错退出，而不是报部署成功。
+_assert_link_host() {
+  local host="$1"
+  if [[ "$host" =~ ^\[.*\]$ ]]; then
+    local inner="${host#\[}"; inner="${inner%\]}"
+    if _is_ipv6 "$inner"; then return 0; fi
+    echo -e "${RED}[错误] 服务器 IPv6 地址无效（${host}），无法生成节点链接，请检查网络后重试。${NC}"
+    return 1
+  fi
+  if _is_ipv4 "$host"; then return 0; fi
+  echo -e "${RED}[错误] 服务器 IP 地址未分配（${host}），无法生成节点链接，请检查网络后重试。${NC}"
+  return 1
 }
 
 _resolve_domain_ips() {
@@ -562,6 +579,22 @@ _fragment_file_for_node() {
   echo "${node_dir}/${port}-${proto_slug}.json"
 }
 
+# 检查某核心的节点片段目录里是否已有该端口的片段文件。
+# 注意：不依赖端口是否正在监听——核心运行时新节点走 30 秒延迟重启，
+# 窗口内端口尚未监听，ss 占用检查查不到，磁盘上的片段才是可靠依据。
+_node_fragment_port_in_use() {
+  local core_name="$1" port="$2" node_dir
+  node_dir=$(_node_dir_for_core "$core_name") || return 1
+  [ -d "$node_dir" ] || return 1
+  local matches=()
+  shopt -s nullglob
+  matches=("$node_dir/${port}-"*.json)
+  shopt -u nullglob
+  # 精确文件名不是 glob 模式：全引用会变成永远存在的字面串，必须用 -f 判断
+  [ -f "$node_dir/${port}.json" ] && matches+=("$node_dir/${port}.json")
+  [ ${#matches[@]} -gt 0 ]
+}
+
 _node_meta_file_for_core() {
   case "$1" in
     Xray) echo "$XRAY_META_FILE" ;;
@@ -610,14 +643,17 @@ _ensure_node_meta_file() {
   elif ! jq empty "$meta_file" >/dev/null 2>&1; then
     printf '[]\n' > "$meta_file"
   fi
+  # 节点索引含全部节点分享链接（UUID/密码），仅 root 可读
+  chmod 600 "$meta_file" 2>/dev/null || true
 }
 
 _node_meta_remove_port() {
-  local core_name="$1" target_port="$2"
+  local core_name="$1" target_port="$2" protocol="${3:-}"
   local meta_file; meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
   local tmp; tmp=$(mktemp) || return 1
-  if jq --argjson vpsbox_meta_port "$target_port" 'map(select(.port != $vpsbox_meta_port))' "$meta_file" > "$tmp"; then
+  # protocol 为空时删该端口全部记录；指定 protocol 时只删端口+协议匹配的记录
+  if jq --argjson vpsbox_meta_port "$target_port" --arg vpsbox_meta_protocol "$protocol" 'map(select(.port != $vpsbox_meta_port or ($vpsbox_meta_protocol != "" and .protocol != $vpsbox_meta_protocol)))' "$meta_file" > "$tmp"; then
     mv "$tmp" "$meta_file"
   else
     rm -f "$tmp"
@@ -637,7 +673,7 @@ _node_meta_upsert() {
       --arg vpsbox_meta_link "$link" \
       --arg vpsbox_meta_file "$file_path" \
       --arg vpsbox_meta_protocol "$protocol" \
-      'map(select(.port != $vpsbox_meta_port)) + [{
+      'map(select(.port != $vpsbox_meta_port or .protocol != $vpsbox_meta_protocol)) + [{
         "port": $vpsbox_meta_port,
         "core": $vpsbox_meta_core,
         "label": $vpsbox_meta_label,
@@ -652,6 +688,53 @@ _node_meta_upsert() {
     rm -f "$tmp"
     return 1
   fi
+}
+
+# 把"本次部署实际新增的 UFW 规则"记到节点元数据里（ufw 字段，如 "tcp" / "udp" / "tcp,udp"），
+# 删除/回滚时按记录清理。只记新增的规则：已存在的规则不记，删除时也不会误删。
+_node_meta_set_ufw() {
+  local core_name="$1" target_port="$2" protocol="$3" ufw_value="$4"
+  local meta_file; meta_file=$(_node_meta_file_for_core "$core_name") || return 1
+  _ensure_node_meta_file "$meta_file"
+  local tmp; tmp=$(mktemp) || return 1
+  if jq --argjson vpsbox_meta_port "$target_port" \
+        --arg vpsbox_meta_protocol "$protocol" \
+        --arg vpsbox_meta_ufw "$ufw_value" \
+        'map(if (.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) then .ufw = $vpsbox_meta_ufw else . end)' \
+        "$meta_file" > "$tmp"; then
+    mv "$tmp" "$meta_file"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# 检查某端口/协议的 UFW 规则是否仍有其他节点需要（排除正在删除的那个条目）。
+# 用于删除节点时避免误删仍被其他节点使用的规则。
+_node_ufw_still_needed() {
+  local port="$1" proto="$2" skip_core="$3" skip_protocol="${4:-}"
+  local meta_file
+  for meta_file in "$XRAY_META_FILE" "$SINGBOX_META_FILE"; do
+    [ -f "$meta_file" ] || continue
+    local core_of_file="Xray"
+    [ "$meta_file" = "$SINGBOX_META_FILE" ] && core_of_file="Sing-box"
+    local entry_proto entry_ufw
+    while IFS=$'\t' read -r entry_proto entry_ufw; do
+      [ -z "$entry_ufw" ] && continue
+      # 跳过正在删除的条目本身
+      if [ "$core_of_file" = "$skip_core" ]; then
+        if [ -n "$skip_protocol" ]; then
+          [ "$entry_proto" = "$skip_protocol" ] && continue
+        else
+          continue
+        fi
+      fi
+      case ",${entry_ufw}," in
+        *",${proto},"*) return 0 ;;
+      esac
+    done < <(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | "\(.protocol // "")\t\(.ufw // "")"' "$meta_file" 2>/dev/null)
+  done
+  return 1
 }
 
 _iptables_bin() {
@@ -849,7 +932,7 @@ _validate_generated_config() {
     fi
   else
     local x_bin; x_bin=$(command -v xray || echo "/usr/local/bin/xray")
-    if "$x_bin" run -test -c "$tmp_file" >"$validate_out" 2>&1; then
+    if timeout 10 "$x_bin" run -test -c "$tmp_file" >"$validate_out" 2>&1; then
       ok=1
     fi
   fi
@@ -899,7 +982,14 @@ rebuild_core_config() {
     return 1
   fi
   mv "$tmp_file" "$config_file"
-  chmod 644 "$config_file" 2>/dev/null || true
+  # 合并配置含全部节点凭证：仅允许属主与核心服务用户读取。
+  # Xray 以 nobody 身份运行，须留组读权限；Sing-box 以 root 运行，600 足够。
+  if [ "$core_name" = "Xray" ]; then
+    chown root:nogroup "$config_file" 2>/dev/null || chown root:nobody "$config_file" 2>/dev/null || true
+    chmod 640 "$config_file" 2>/dev/null || true
+  else
+    chmod 600 "$config_file" 2>/dev/null || true
+  fi
   if [ "$core_name" = "Xray" ]; then
     find "$(dirname "$config_file")" -type f \( -name '*.crt' -o -name 'fullchain.pem' \) -exec chmod 644 {} \; 2>/dev/null || true
     find "$(dirname "$config_file")" -type f \( -name '*.key' -o -name 'privkey.pem' \) -exec chmod 600 {} \; 2>/dev/null || true
@@ -912,6 +1002,17 @@ write_node_fragment() {
   local node_dir tmp_file final_file
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   mkdir -p "$node_dir"
+  # 同一端口已在任一核心上部署过片段时拒绝写入：两个同端口片段会让
+  # 核心在延迟重启时因端口冲突起不来，全核心节点断线，还会产生孤儿节点。
+  # 两核心都绑定 0.0.0.0，同一端口在两个核心上也不可能同时工作。
+  local _gate_core
+  for _gate_core in Xray Sing-box; do
+    if _node_fragment_port_in_use "$_gate_core" "$port"; then
+      echo -e "${RED}[错误] 端口 $port 已在 ${_gate_core} 上部署了节点，拒绝重复部署（避免核心启动冲突）。${NC}"
+      echo -e "${YELLOW}如需重新部署该端口，请先删除旧节点。${NC}"
+      return 1
+    fi
+  done
   tmp_file=$(mktemp) || return 1
   final_file=$(_fragment_file_for_node "$core_name" "$port" "$protocol") || { rm -f "$tmp_file"; return 1; }
   printf '%s
@@ -957,17 +1058,33 @@ persist_node_runtime() {
 }
 
 remove_node_runtime() {
-  local core_name="$1" port="$2"
-  local meta_file fragment_file node_dir backup_fragment node_link node_protocol
+  local core_name="$1" port="$2" protocol="${3:-}"
+  local meta_file fragment_file node_dir backup_fragment node_link node_protocol node_ufw
   meta_file=$(_node_meta_file_for_core "$core_name") || return 1
   node_dir=$(_node_dir_for_core "$core_name") || return 1
   _ensure_node_meta_file "$meta_file"
-  node_link=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
-  node_protocol=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
-  fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .file' "$meta_file" 2>/dev/null | head -n 1)
+  # protocol 指定时只匹配端口+协议的记录；不指定时按端口匹配（兼容旧调用）
+  if [ -n "$protocol" ]; then
+    node_link=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
+    node_protocol="$protocol"
+    node_ufw=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .ufw // ""' "$meta_file" 2>/dev/null | head -n 1)
+    fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" --arg vpsbox_meta_protocol "$protocol" '.[] | select(.port == $vpsbox_meta_port and .protocol == $vpsbox_meta_protocol) | .file' "$meta_file" 2>/dev/null | head -n 1)
+  else
+    node_link=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .link // ""' "$meta_file" 2>/dev/null | head -n 1)
+    node_protocol=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
+    node_ufw=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .ufw // ""' "$meta_file" 2>/dev/null | sort -u | paste -sd, -)
+    fragment_file=$(jq -r --argjson vpsbox_meta_port "$port" '.[] | select(.port == $vpsbox_meta_port) | .file' "$meta_file" 2>/dev/null | head -n 1)
+  fi
   if [ -z "$fragment_file" ] || [ ! -f "$fragment_file" ]; then
     shopt -s nullglob
-    local matches=("$node_dir/${port}-"*.json "$node_dir/${port}.json")
+    local matches=()
+    if [ -n "$protocol" ]; then
+      local _slug; _slug=$(_sanitize_filename_component "$protocol"); [ -z "$_slug" ] && _slug="node"
+      [ -f "$node_dir/${port}-${_slug}.json" ] && matches=("$node_dir/${port}-${_slug}.json")
+    else
+      matches=("$node_dir/${port}-"*.json)
+      [ -f "$node_dir/${port}.json" ] && matches+=("$node_dir/${port}.json")
+    fi
     shopt -u nullglob
     if [ ${#matches[@]} -eq 0 ]; then
       echo -e "${RED}[错误] 未找到端口 $port 对应的节点片段文件。${NC}"
@@ -994,7 +1111,21 @@ remove_node_runtime() {
   if [ "$node_protocol" = "hysteria2" ]; then
     _remove_hy2_port_hopping "$port" "$node_link" || true
   fi
-  _node_meta_remove_port "$core_name" "$port" || true
+  # 清理本次部署新增的 UFW 规则（按元数据里的 ufw 记录；仍有其他节点用时保留）
+  if [ -n "$node_ufw" ]; then
+    local -a _ufw_protos
+    local _p
+    IFS=',' read -ra _ufw_protos <<< "$node_ufw"
+    for _p in "${_ufw_protos[@]}"; do
+      [ -n "$_p" ] || continue
+      if _node_ufw_still_needed "$port" "$_p" "$core_name" "$protocol"; then
+        echo -e "${YELLOW}[提示] 端口 ${port}/${_p} 仍有其他节点使用，保留 UFW 规则。${NC}"
+      else
+        _ufw_delete_if_added "$port" "$_p" 1
+      fi
+    done
+  fi
+  _node_meta_remove_port "$core_name" "$port" "$protocol" || true
   return 0
 }
 
@@ -4358,6 +4489,7 @@ local ts
 ts=$(date +"%Y%m%d_%H%M%S")
 local bk_path="${BACKUP_DIR}/node_backup_${ts}"
 mkdir -p "$bk_path"
+chmod 700 "$bk_path" 2>/dev/null || true
 [ -f "$XRAY_CONFIG_FILE" ] && cp "$XRAY_CONFIG_FILE" "$bk_path/xray_config.json"
 [ -f "$SINGBOX_CONFIG_FILE" ] && cp "$SINGBOX_CONFIG_FILE" "$bk_path/singbox_config.json"
 [ -d "$XRAY_NODES_DIR" ] && cp -r "$XRAY_NODES_DIR" "$bk_path/xray_nodes.d"
@@ -4365,6 +4497,9 @@ mkdir -p "$bk_path"
 [ -f "$XRAY_META_FILE" ] && cp "$XRAY_META_FILE" "$bk_path/xray_nodes_meta.json"
 [ -f "$SINGBOX_META_FILE" ] && cp "$SINGBOX_META_FILE" "$bk_path/singbox_nodes_meta.json"
 [ -f "$NODE_RECORD_FILE" ] && cp "$NODE_RECORD_FILE" "$bk_path/vpsbox_nodes.txt"
+# 备份内含全部节点凭证：目录 700、文件 600
+find "$bk_path" -type d -exec chmod 700 {} + 2>/dev/null || true
+find "$bk_path" -type f -exec chmod 600 {} + 2>/dev/null || true
 echo -e "\n${GREEN}[成功] 节点配置已成功备份至: $bk_path ${NC}"; pause_for_enter
 elif [[ "$vn_opt" =~ ^[rR]$ ]]; then
 shopt -s nullglob; local n_backups=("${BACKUP_DIR}"/node_backup_*); shopt -u nullglob
@@ -4494,18 +4629,21 @@ read -r -p "> 请输入要删除的节点【端口号】 (输入 0 取消): " de
 del_port="${del_port// /}"
 if [ "$del_port" == "0" ]; then return; fi
 if [ -z "$del_port" ] || ! [[ "$del_port" =~ ^[0-9]+$ ]]; then echo -e "${RED}[错误] 端口号必须是有效的纯数字！请重新输入。${NC}"; continue; fi
-local core_for_port=""
-if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$XRAY_META_FILE" >/dev/null 2>&1; then core_for_port="Xray"; fi
-if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$SINGBOX_META_FILE" >/dev/null 2>&1; then core_for_port="Sing-box"; fi
-if [ -z "$core_for_port" ]; then echo -e "${RED}[错误] 当前部署中未找到端口为 $del_port 的节点，请检查！${NC}"; continue; fi
+local cores_for_port=()
+if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$XRAY_META_FILE" >/dev/null 2>&1; then cores_for_port+=("Xray"); fi
+if jq -e --argjson vpsbox_meta_port "$del_port" '.[] | select(.port == $vpsbox_meta_port)' "$SINGBOX_META_FILE" >/dev/null 2>&1; then cores_for_port+=("Sing-box"); fi
+if [ ${#cores_for_port[@]} -eq 0 ]; then echo -e "${RED}[错误] 当前部署中未找到端口为 $del_port 的节点，请检查！${NC}"; continue; fi
 break
 done
 if ! confirm_action "永久删除端口为 $del_port 的节点" "n"; then pause_for_enter; return; fi
-if remove_node_runtime "$core_for_port" "$del_port"; then
-echo -e "${GREEN}[成功] 已成功移除 ${core_for_port} 中占用端口 $del_port 的节点配置，新配置约 30 秒后生效！${NC}"
+local _del_core
+for _del_core in "${cores_for_port[@]}"; do
+if remove_node_runtime "$_del_core" "$del_port"; then
+echo -e "${GREEN}[成功] 已成功移除 ${_del_core} 中占用端口 $del_port 的节点配置，新配置约 30 秒后生效！${NC}"
 else
-echo -e "${RED}[错误] ${core_for_port} 节点删除失败，原有连接未被强制重启。${NC}"
+echo -e "${RED}[错误] ${_del_core} 节点删除失败，原有连接未被强制重启。${NC}"
 fi
+done
 if [ -f "$NODE_RECORD_FILE" ]; then sed -i "/端口:${del_port} /d" "$NODE_RECORD_FILE" 2>/dev/null; fi
 pause_for_enter
 }
@@ -4526,7 +4664,7 @@ verify_node_activation() {
     local listen_proto
     listen_proto=$(_listen_proto_for_node_protocol "$PROTOCOL_NAME")
     echo -e "${YELLOW}>>> 正在等待 ${CORE_NAME} 加载新配置并监听 ${TARGET_PORT}/${listen_proto}...${NC}"
-    if _wait_for_port_listen "$TARGET_PORT" "$listen_proto" 40; then
+    if _wait_for_port_listen "$TARGET_PORT" "$listen_proto" 60; then
         echo -e "${GREEN}  ✓ 已检测到端口 ${TARGET_PORT}/${listen_proto} 正在监听${NC}"
         return 0
     else
@@ -4542,7 +4680,7 @@ finalize_node_activation() {
     local core_name="$1" port="$2" protocol="$3"
     if verify_node_activation "$core_name" "$port" "$protocol"; then return 0; fi
     echo -e "${RED}[错误] 节点未成功启动，正在回滚配置和分享记录。${NC}"
-    remove_node_runtime "$core_name" "$port" >/dev/null 2>&1 || true
+    remove_node_runtime "$core_name" "$port" "$protocol" >/dev/null 2>&1 || true
     [ -f "$NODE_RECORD_FILE" ] && sed -i "/端口:${port} /d" "$NODE_RECORD_FILE" 2>/dev/null
     return 1
 }
@@ -4583,6 +4721,8 @@ output_node_result() {
     # 持久化记录
     sed -i "/端口:${PORT} /d" "$NODE_RECORD_FILE" 2>/dev/null
     echo "${CORE_NAME}-${LABEL} | 端口:${PORT} | ${LINK}" >> "$NODE_RECORD_FILE"
+    # 分享记录含全部节点凭证，仅 root 可读
+    chmod 600 "$NODE_RECORD_FILE" 2>/dev/null || true
 }
 
 install_reality_node() {
@@ -4596,7 +4736,8 @@ read -r -p "> 请输入监听端口 (默认 50000, 0 取消): " PORT || return 1
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=50000
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then echo -e "${RED}[错误] 端口号必须是 1 到 65535 之间的纯数字！请重新输入。${NC}"; continue; fi
-if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
+PORT=$((10#$PORT))
+if _port_is_listening "$PORT" tcp; then echo -e "${RED}[错误] 端口 $PORT 已被占用！${NC}"; continue; fi
 break
 done
 core_choice=$(select_core) || return
@@ -4634,10 +4775,12 @@ if [[ -z "$PRI" || -z "$PUB" || ! "$PRI" =~ ^[A-Za-z0-9_-]{43}$ || ! "$PUB" =~ ^
   pause_for_enter; return
 fi
 
+_assert_link_host "$LINK_IP" || { pause_for_enter; return; }
 LINK="vless://${UUID}@${LINK_IP}:${PORT}?encryption=none&security=reality&sni=${SNI_DOMAIN}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&flow=xtls-rprx-vision#Reality-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "VLESS-Reality" "vless-reality" "$LINK"; then
     _ufw_allow_if_active "$PORT" tcp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && _node_meta_set_ufw "$CORE_NAME" "$PORT" "vless-reality" "tcp" || true
     output_node_result "$LINK" "VLESS-Reality" "$PORT" "$CORE_NAME" "vless-reality"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。旧连接不会因新增节点在部署中途被重启。${NC}"
     finalize_node_activation "$CORE_NAME" "$PORT" "vless-reality" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
@@ -4666,6 +4809,7 @@ if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
 if [ "$cert_mode" == "1" ]; then
     read -r -s -p "> CF API Token: " CF_Token || return 1; echo ""; [ -z "$CF_Token" ] && continue
     export CF_Token="$CF_Token"; break
+    break
 else
     if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
         echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
@@ -4682,7 +4826,8 @@ read -r -p "> 监听端口 (默认 443, 0 取消): " PORT || return 1
 PORT="${PORT// /}"
 if [ "$PORT" == "0" ]; then return; fi; [ -z "$PORT" ] && PORT=443
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then continue; fi
-if ss -tulpn | grep -qE ":${PORT}[[:space:]]|:${PORT}$"; then echo -e "${RED}端口 $PORT 已被占用！${NC}"; continue; fi
+PORT=$((10#$PORT))
+if _port_is_listening "$PORT" tcp; then echo -e "${RED}端口 $PORT 已被占用！${NC}"; continue; fi
 break
 done
 
@@ -4702,6 +4847,7 @@ LINK="anytls://${PASSWORD}@${DOMAIN}:${PORT}?peer=${DOMAIN}#AnyTLS-${PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$PORT" "$CORE_NAME" "AnyTLS" "anytls" "$LINK"; then
     _ufw_allow_if_active "$PORT" tcp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && _node_meta_set_ufw "$CORE_NAME" "$PORT" "anytls" "tcp" || true
     output_node_result "$LINK" "AnyTLS" "$PORT" "$CORE_NAME" "anytls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
     finalize_node_activation "$CORE_NAME" "$PORT" "anytls" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
@@ -4727,7 +4873,19 @@ acquire_cert() {
     cert_matches_domain() {
         local cert_file="$1" domain="$2"
         [ -f "$cert_file" ] || return 1
-        openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null | grep -Eq "DNS:(\*\.)?${domain//./\\.}([,[:space:]]|$)"
+        local san
+        san=$(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null) || return 1
+        # 精确匹配：SAN 里必须有与域名完全相同的条目
+        if printf '%s' "$san" | grep -Eq "DNS:${domain//./\\.}(,|[[:space:]]|$)"; then
+            return 0
+        fi
+        # 通配符证书只覆盖直接子域名：*.example.com 覆盖 www.example.com，
+        # 但不覆盖 example.com 本身，也不覆盖多级子域名。
+        local parent="${domain#*.}"
+        if [ "$parent" != "$domain" ]; then
+            printf '%s' "$san" | grep -Eq "DNS:\\*\\.${parent//./\\.}(,|[[:space:]]|$)" && return 0
+        fi
+        return 1
     }
 
     # 按域名分离证书目录，杜绝不同域名复用同一证书
@@ -4746,10 +4904,14 @@ acquire_cert() {
 
     # 修复：不仅看 acme.sh list 还要检查物理文件 + 目标目录证书有效性
     if [ -d "$acme_domain_dir" ] && [ -f "$acme_domain_dir/${DOMAIN}.cer" ]; then
-            # 进一步验证：目标 CERT_DIR 中的证书是否存在且属于该域名
+            # 进一步验证：目标 CERT_DIR 中的证书是否存在、属于该域名且未过期
             if cert_matches_domain "$CERT_DIR/fullchain.pem" "$DOMAIN"; then
-                echo -e "${GREEN}[成功] 检测到本地有效证书（域名匹配），复用机制触发！${NC}"
-                CERT_RES=0
+                if openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+                    echo -e "${GREEN}[成功] 检测到本地有效证书（域名匹配且未过期），复用机制触发！${NC}"
+                    CERT_RES=0
+                else
+                    echo -e "${YELLOW}[警告] 本地证书已过期，将重新申请证书。${NC}"
+                fi
             else
                 echo -e "${YELLOW}[提示] 检测到 acme.sh 证书记录但目标证书目录不匹配，将重新安装证书到 ${CERT_DIR}${NC}"
             fi
@@ -4804,6 +4966,11 @@ acquire_cert() {
 
     if ! openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -dates 2>/dev/null; then
         echo -e "${RED}[错误] 证书文件无效或格式错误${NC}"
+        rm -rf "$CERT_DIR"
+        return 1
+    fi
+    if ! openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+        echo -e "${RED}[错误] 证书已过期，拒绝使用${NC}"
         rm -rf "$CERT_DIR"
         return 1
     fi
@@ -5002,6 +5169,28 @@ renew_certificate() {
   pause_for_enter
 }
 
+# 扫描两个核心的节点片段，列出引用了指定证书目录的节点。
+# 找到引用时打印"核心 端口 X 协议 Y"并返回 0；无引用返回 1。
+_cert_referenced_by_nodes() {
+  local cert_dir="$1"
+  local found=0 core_name node_dir meta_file frag
+  for core_name in Xray Sing-box; do
+    node_dir=$(_node_dir_for_core "$core_name") || continue
+    meta_file=$(_node_meta_file_for_core "$core_name") || continue
+    [ -d "$node_dir" ] || continue
+    for frag in "$node_dir"/*.json; do
+      [ -f "$frag" ] || continue
+      grep -qF "$cert_dir" "$frag" 2>/dev/null || continue
+      local p pr
+      p=$(jq -r --arg f "$frag" '.[] | select(.file == $f) | .port // ""' "$meta_file" 2>/dev/null | head -n 1)
+      pr=$(jq -r --arg f "$frag" '.[] | select(.file == $f) | .protocol // ""' "$meta_file" 2>/dev/null | head -n 1)
+      echo -e "  - ${CYAN}${core_name}${NC} 端口 ${p:-未知} 协议 ${pr:-未知} 文件 ${frag}"
+      found=1
+    done
+  done
+  [ "$found" -eq 1 ]
+}
+
 delete_certificate() {
   clear_screen; print_divider
   print_center "[ 删除证书 ]" "$CYAN"
@@ -5010,8 +5199,16 @@ delete_certificate() {
   echo ""
   _select_cert_domain domain || { pause_for_enter; return; }
   cert_dir="/etc/vpsbox-cert/${domain}"
+  local refs
+  if refs=$(_cert_referenced_by_nodes "$cert_dir"); then
+    echo -e "${RED}[错误] 该证书仍被以下节点引用，拒绝删除：${NC}"
+    printf '%s\n' "$refs"
+    echo -e "${YELLOW}请先删除这些节点，再删除证书。${NC}"
+    pause_for_enter
+    return
+  fi
   echo -e "${YELLOW}将删除:${NC} ${cert_dir}"
-  echo -e "${YELLOW}注意：如果仍有 WS-TLS / AnyTLS / HY2 节点引用该证书，节点会失效。${NC}"
+  echo -e "${GREEN}已确认无节点引用该证书。${NC}"
   if ! confirm_action "删除 ${domain} 的证书文件和 acme.sh 记录" "n"; then pause_for_enter; return; fi
   if [ -x /root/.acme.sh/acme.sh ]; then
     /root/.acme.sh/acme.sh --remove -d "$domain" >/dev/null 2>&1 || true
@@ -5046,6 +5243,7 @@ clear_screen; print_divider
 print_center "[ 部署 VLESS-WS-TLS 节点 ]" "$CYAN"
 echo -e "${YELLOW}>>> 小白科普：WS+TLS 是非常经典的节点协议。最大的优势是可以搭配 Cloudflare 等 CDN 使用。如果您服务器的 IP 已经被墙，用这个协议配合 CDN 就能起死回生。${NC}\n"
 
+echo -e "${YELLOW}>>> 证书说明：WS-TLS 部署需要域名证书，稍后可选择 Cloudflare API 模式（域名无需解析到本机）或独立模式（域名必须解析到本机）。${NC}\n"
 _read_domain_or_retry DOMAIN "> 请输入域名 (输入 0 取消): " || return
 DOMAIN_IP=$(_domain_resolution_summary "$DOMAIN")
 while true; do
@@ -5053,14 +5251,23 @@ read -r -p "> 监听端口 (默认 443, 0 取消): " WS_PORT || return 1
 WS_PORT="${WS_PORT// /}"
 if [ "$WS_PORT" == "0" ]; then return; fi; [ -z "$WS_PORT" ] && WS_PORT=443
 if ! [[ "$WS_PORT" =~ ^[0-9]+$ ]] || [ "$WS_PORT" -lt 1 ] || [ "$WS_PORT" -gt 65535 ]; then continue; fi
+WS_PORT=$((10#$WS_PORT))
 case "$WS_PORT" in
   443|2053|2083|2087|2096|8443) ;;
   *) echo -e "${RED}[错误] Cloudflare HTTPS 代理不支持端口 ${WS_PORT}。请选择 443/2053/2083/2087/2096/8443。${NC}"; continue ;;
 esac
-if ss -tulpn | grep -qE ":${WS_PORT}[[:space:]]|:${WS_PORT}$"; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
+if _port_is_listening "$WS_PORT" tcp; then echo -e "${RED}端口 $WS_PORT 已被占用！${NC}"; continue; fi
 break
 done
 core_choice=$(select_core) || return
+echo -e "\n${CYAN}>>> 证书申请模式选择${NC}"
+echo -e "  ${GREEN}1.${NC} 【API模式】使用 Cloudflare API 申请（域名无需解析到本机，适合开 CDN 代理）\n  ${GREEN}2.${NC} 【独立模式】使用常规 80 端口申请（域名必须解析到本机）"
+while true; do
+_read_menu_choice cert_mode "> 选择模式 [1-2, 默认 1, 0 取消]: "
+cert_mode="${cert_mode// /}"
+if [ "$cert_mode" == "0" ]; then return; fi; [ -z "$cert_mode" ] && cert_mode=1
+if [[ "$cert_mode" != "1" && "$cert_mode" != "2" ]]; then continue; fi
+if [ "$cert_mode" == "1" ]; then
 echo -e "\n${YELLOW}>>> 如何获取 Cloudflare API Token？${NC}"
 echo -e "  ${GREEN}1.${NC} 登录 Cloudflare 控制台: https://dash.cloudflare.com"
 echo -e "  ${GREEN}2.${NC} 点击右上角头像 →「我的个人资料」→「API 令牌」"
@@ -5073,9 +5280,20 @@ echo ""
 CF_Token="${CF_Token// /}"
 if [ "$CF_Token" == "0" ]; then return; fi
 if [ -z "$CF_Token" ]; then continue; fi
-export CF_Token="$CF_Token"; break
+export CF_Token="$CF_Token"
+break
 done
-cert_mode=1
+break
+else
+if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
+echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
+echo -e "${YELLOW}  ⚠️  可能开了 CF 小黄云，请关闭代理或换 API 模式。${NC}"
+read -r -p "> 强行继续？(y/n): " force_continue || return 1
+[[ ! "${force_continue// /}" =~ ^[yY]$ ]] && continue
+fi
+break
+fi
+done
 if ! confirm_action "开始部署 WS+TLS 节点并申请证书"; then pause_for_enter; return; fi
 acquire_cert "$DOMAIN" "$cert_mode" "$CF_Token" "" || { pause_for_enter; return; }
 unset CF_Token
@@ -5094,6 +5312,7 @@ LINK="vless://${UUID}@${DOMAIN}:${WS_PORT}?encryption=none&security=tls&sni=${DO
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$WS_PORT" "$CORE_NAME" "VLESS-WS-TLS" "vless-ws-tls" "$LINK"; then
     _ufw_allow_if_active "$WS_PORT" tcp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && _node_meta_set_ufw "$CORE_NAME" "$WS_PORT" "vless-ws-tls" "tcp" || true
     output_node_result "$LINK" "VLESS-WS-TLS" "$WS_PORT" "$CORE_NAME" "vless-ws-tls"
     echo -e "\n${GREEN}>>> 已通过独立端口配置文件完成接入。${NC}"
     finalize_node_activation "$CORE_NAME" "$WS_PORT" "vless-ws-tls" || echo -e "${YELLOW}请检查核心服务日志后重试部署。${NC}"
@@ -5101,6 +5320,7 @@ else
     echo -e "\n${RED}[错误] 配置校验失败。${NC}"
 fi
 
+if [ "$cert_mode" == "1" ]; then
 echo ""
 echo -e "${YELLOW}>>> 小白提示：必须开启 Cloudflare 小黄云（CDN 代理）${NC}"
 echo -e "  WS-TLS 搭配 CDN 优选才能发挥最佳效果。开启后："
@@ -5109,6 +5329,7 @@ echo -e "     ✅ 被墙的 IP 能「起死回生」"
 echo -e "     🔧 操作：CF 控制台 → DNS 记录 → 编辑 → 代理状态打开（橙色云朵）"
 echo -e "  ⚠️  记得在 CF 的 SSL/TLS 设置中开启「完全（严格）」模式"
 echo ""
+fi
 pause_for_enter
 }
 
@@ -5124,6 +5345,7 @@ read -r -p "> 监听端口 (默认 40000, 0 取消): " SS_PORT || return 1
 SS_PORT="${SS_PORT// /}"
 if [ "$SS_PORT" == "0" ]; then return; fi; [ -z "$SS_PORT" ] && SS_PORT=40000
 if ! _valid_port "$SS_PORT"; then echo -e "${RED}[错误] 端口号必须是 1-65535。${NC}"; continue; fi
+SS_PORT=$((10#$SS_PORT))
 if _port_is_listening "$SS_PORT"; then echo -e "${RED}[错误] 端口 $SS_PORT 已被占用！${NC}"; continue; fi
 break
 done
@@ -5164,11 +5386,16 @@ fi
 
 SS_USERINFO=$(printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 -w0 2>/dev/null || printf '%s:%s' "$SS_METHOD" "$SS_PASS" | base64 | tr -d '\n')
 SS_USERINFO=$(printf '%s' "$SS_USERINFO" | tr '+/' '-_' | tr -d '=')
+_assert_link_host "$LINK_IP" || { pause_for_enter; return; }
 LINK="ss://${SS_USERINFO}@${LINK_IP}:${SS_PORT}#SS-${SS_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$SS_PORT" "$CORE_NAME" "Shadowsocks" "shadowsocks" "$LINK"; then
+    SS_UFW=""
     _ufw_allow_if_active "$SS_PORT" tcp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && SS_UFW="tcp"
     _ufw_allow_if_active "$SS_PORT" udp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && SS_UFW="${SS_UFW:+$SS_UFW,}udp"
+    [ -n "$SS_UFW" ] && _node_meta_set_ufw "$CORE_NAME" "$SS_PORT" "shadowsocks" "$SS_UFW" || true
     output_node_result "$LINK" "Shadowsocks" "$SS_PORT" "$CORE_NAME" "shadowsocks"
     echo -e "\n${GREEN}>>> Shadowsocks 节点已生成。${NC}"
     echo -e "${YELLOW}>>> 如使用云厂商安全组，请同时放行 ${SS_PORT}/tcp 与 ${SS_PORT}/udp。${NC}"
@@ -5179,10 +5406,51 @@ fi
 pause_for_enter
 }
 
+# 检查新 Hy2 跳跃范围是否与已有跳跃范围重叠。
+# 查两处：节点元数据里其他节点的 mport 范围，以及 live iptables nat REDIRECT 规则。
+# 重叠时打印已有范围并返回 0；无重叠返回 1。
+# 同一目标端口的旧规则不算重叠（重装同一节点时旧规则会被替换）。
+_hy2_hop_range_overlaps() {
+  local target_port="$1" start="$2" end="$3"
+  local core_name meta_file entry eport elink range rstart rend
+  for core_name in Xray Sing-box; do
+    meta_file=$(_node_meta_file_for_core "$core_name" 2>/dev/null) || continue
+    [ -f "$meta_file" ] || continue
+    while IFS='|' read -r eport elink; do
+      [ -n "$elink" ] || continue
+      [ "$eport" == "$target_port" ] && continue
+      range=$(_extract_mport_from_link "$elink")
+      [ -n "$range" ] || continue
+      rstart=$((10#${range%-*})); rend=$((10#${range#*-}))
+      if [ "$start" -le "$rend" ] && [ "$rstart" -le "$end" ]; then
+        echo -e "${RED}[错误] 跳跃范围 ${start}-${end} 与已有节点（${core_name} 端口 ${eport}）的跳跃范围 ${range} 重叠，拒绝创建。${NC}"
+        return 0
+      fi
+    done < <(jq -r '.[] | "\(.port)|\(.link // "")"' "$meta_file" 2>/dev/null)
+  done
+  local ipt rule rt
+  ipt=$(_iptables_bin 2>/dev/null) || return 1
+  for chain in PREROUTING OUTPUT; do
+    while IFS= read -r rule; do
+      range=$(printf '%s' "$rule" | grep -oE -- '--dport [0-9]+:[0-9]+' | head -n 1 | sed 's/--dport //;s/:/-/')
+      [ -n "$range" ] || continue
+      rt=$(printf '%s' "$rule" | grep -oE -- '--to-ports [0-9]+' | head -n 1 | awk '{print $2}')
+      [ -n "$rt" ] && [ "$rt" == "$target_port" ] && continue
+      rstart=$((10#${range%-*})); rend=$((10#${range#*-}))
+      if [ "$start" -le "$rend" ] && [ "$rstart" -le "$end" ]; then
+        echo -e "${RED}[错误] 跳跃范围 ${start}-${end} 与 live iptables 规则的跳跃范围 ${range}（目标端口 ${rt:-未知}）重叠，拒绝创建。${NC}"
+        return 0
+      fi
+    done < <("$ipt" -t nat -S "$chain" 2>/dev/null | grep -F 'REDIRECT')
+  done
+  return 1
+}
+
 _setup_hy2_port_hopping() {
   local target_port="$1" range="$2" start end configured=0 ipt="" conflict_port="" state_file
   if ! [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then return 1; fi
   start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+  start=$((10#$start)); end=$((10#$end))
   _valid_port "$start" && _valid_port "$end" && [ "$start" -le "$end" ] || return 1
   if [ "$target_port" -ge "$start" ] && [ "$target_port" -le "$end" ]; then
     echo -e "${RED}[错误] 跳跃端口范围不能包含主监听端口 ${target_port}。${NC}"
@@ -5191,6 +5459,9 @@ _setup_hy2_port_hopping() {
   conflict_port=$(ss -H -uln 2>/dev/null | awk -v s="$start" -v e="$end" '{n=split($5,a,":"); p=a[n]; if (p ~ /^[0-9]+$/ && p >= s && p <= e) {print p; exit}}')
   if [ -n "$conflict_port" ]; then
     echo -e "${RED}[错误] 跳跃范围内的 UDP 端口 ${conflict_port} 已被占用，拒绝覆盖现有服务。${NC}"
+    return 1
+  fi
+  if _hy2_hop_range_overlaps "$target_port" "$start" "$end"; then
     return 1
   fi
   if ! _ensure_iptables_persistence; then
@@ -5314,7 +5585,8 @@ read -r -p "> 监听端口 (默认 8443, 0 取消): " HY2_PORT || return 1
 HY2_PORT="${HY2_PORT// /}"
 if [ "$HY2_PORT" == "0" ]; then return; fi; [ -z "$HY2_PORT" ] && HY2_PORT=8443
 if ! _valid_port "$HY2_PORT"; then continue; fi
-if _port_is_listening "$HY2_PORT"; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
+HY2_PORT=$((10#$HY2_PORT))
+if _port_is_listening "$HY2_PORT" udp; then echo -e "${RED}端口 $HY2_PORT 已被占用！${NC}"; continue; fi
 break
 done
 
@@ -5337,6 +5609,8 @@ if [ "$hop_choice" = "2" ]; then
           echo -e "${RED}[错误] 跳跃端口范围不能包含主监听端口 ${HY2_PORT}。${NC}"
           continue
         fi
+        HOP_START=$((10#$HOP_START)); HOP_END=$((10#$HOP_END))
+        HY2_HOP_RANGE="${HOP_START}-${HOP_END}"
         HY2_HOP_ENABLED=1
         break
       fi
@@ -5364,6 +5638,7 @@ if [ "$hy2_cert_profile" = "2" ]; then
   echo ""
   if [ -z "$CF_Token" ]; then continue; fi
   export CF_Token="$CF_Token"; break
+  break
   elif [ "$cert_mode" == "2" ]; then
   if [ -n "$DOMAIN_IP" ] && ! _domain_points_to_server "$DOMAIN"; then
   echo -e "\n${YELLOW}[警告] 域名解析结果 ($DOMAIN_IP) 与本机 IP 不符！${NC}"
@@ -5394,6 +5669,7 @@ ensure_singbox_core || { pause_for_enter; return; }
 NEW_INBOUND='{"type":"hysteria2","listen":"0.0.0.0","listen_port":'$HY2_PORT',"users":[{"password":"'$HY2_PASS'"}],"tls":{"enabled":true,"server_name":$(_json_escape "$HY2_SNI"),"alpn":["h3"],"certificate_path":"'$CERT_DIR'/fullchain.pem","key_path":"'$CERT_DIR'/privkey.pem"}}'
 fi
 
+if [ "$hy2_cert_profile" = "1" ]; then _assert_link_host "$HY2_LINK_HOST" || { pause_for_enter; return; }; fi
 LINK="hysteria2://${HY2_PASS}@${HY2_LINK_HOST}:${HY2_PORT}/?sni=${HY2_SNI}&alpn=h3&insecure=${HY2_INSECURE}"
 if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
     LINK="${LINK}&mport=${HY2_HOP_RANGE}"
@@ -5402,10 +5678,11 @@ LINK="${LINK}#HY2-${HY2_PORT}"
 
 if append_inbound "$(_config_file_for_core "$CORE_NAME")" "$NEW_INBOUND" "$HY2_PORT" "$CORE_NAME" "Hysteria2" "hysteria2" "$LINK"; then
     _ufw_allow_if_active "$HY2_PORT" udp
+    [ "$VPSBOX_UFW_RULE_ADDED" = "1" ] && _node_meta_set_ufw "$CORE_NAME" "$HY2_PORT" "hysteria2" "udp" || true
     if [ "$HY2_HOP_ENABLED" -eq 1 ]; then
         if ! _setup_hy2_port_hopping "$HY2_PORT" "$HY2_HOP_RANGE"; then
             echo -e "\n${RED}[错误] 端口跳跃规则创建失败，正在回滚本次 HY2 节点。${NC}"
-            remove_node_runtime "$CORE_NAME" "$HY2_PORT" >/dev/null 2>&1 || true
+            remove_node_runtime "$CORE_NAME" "$HY2_PORT" "hysteria2" >/dev/null 2>&1 || true
             pause_for_enter
             return
         fi
