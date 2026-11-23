@@ -349,19 +349,26 @@ _collect_public_listen_entries() {
   '
 }
 
+# 同步重启 SSH 并验证监听：重启后等待端口恢复监听，失败返回非零，
+# 调用方按返回值报成功/失败（不要放后台，否则"成功"会在验证完成前打印）。
 _restart_ssh_service_safely() {
-  local action_desc="$1"
+  local action_desc="$1" _vpsbox_ssh_port
   if ! _sshd_config_test; then
     echo -e "${RED}[错误] SSH 配置校验失败，已取消重启。${NC}"
     return 1
   fi
-  [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，SSH 服务已安排后台短暂重启，请留意新配置是否生效。${NC}"
-  ( sleep 1; _svc_restart sshd >/dev/null 2>&1 || _svc_restart ssh >/dev/null 2>&1; sleep 3
-    _vpsbox_ssh_port=$(_sshd_effective_value Port 2>/dev/null || true)
-    [ -z "$_vpsbox_ssh_port" ] && _vpsbox_ssh_port=22
-    if ! _port_is_listening "$_vpsbox_ssh_port" tcp; then
-      echo -e "${RED}[错误] SSH 重启后未在端口 ${_vpsbox_ssh_port} 监听，请立即检查服务状态（systemctl status sshd）！${NC}"
-    fi ) &
+  [ -n "$action_desc" ] && echo -e "${YELLOW}[提示] ${action_desc}，正在重启 SSH 服务并验证监听…${NC}"
+  if ! _svc_restart sshd >/dev/null 2>&1 && ! _svc_restart ssh >/dev/null 2>&1; then
+    echo -e "${RED}[错误] SSH 服务重启命令失败，请检查服务状态（systemctl status sshd）。${NC}"
+    return 1
+  fi
+  _vpsbox_ssh_port=$(_sshd_effective_value Port 2>/dev/null || true)
+  [ -z "$_vpsbox_ssh_port" ] && _vpsbox_ssh_port=22
+  if _wait_for_port_listen "$_vpsbox_ssh_port" tcp 10; then
+    return 0
+  fi
+  echo -e "${RED}[错误] SSH 重启后未在端口 ${_vpsbox_ssh_port} 监听，请立即检查服务状态（systemctl status sshd）！${NC}"
+  return 1
 }
 
 # SSH 生效配置查询：优先用 sshd -T（权威），回退到主文件 + drop-in 递归 grep（与 change_ssh_port 同源取法）。
@@ -1888,7 +1895,7 @@ _bbr_verify_downloaded_file() {
   sums_tmp=$(mktemp) || return 1
   for sums_name in SHA256SUMS sha256sums.txt SHA256SUMS.txt; do
     if curl -fsSL --connect-timeout 10 --max-time 30 "${base}/${sums_name}" -o "$sums_tmp" 2>/dev/null && [ -s "$sums_tmp" ]; then
-      expected=$(awk -v f="$(basename "$file")" '{ gsub(/^\*/, "", $2); if ($2 == f) { print $1; exit } }' "$sums_tmp")
+      expected=$(awk -v f="$(basename "$file")" '{ sub(/\r$/, "", $2); gsub(/^\*/, "", $2); n=split($2, parts, "/"); if (parts[n] == f) { print $1; exit } }' "$sums_tmp")
       rm -f "$sums_tmp"
       if [ -n "$expected" ]; then
         actual=$(sha256sum "$file" | awk '{print $1}')
@@ -2189,10 +2196,10 @@ _bbr_generate_dynamic_profile() {
 
   local local_bw="$BBR_TUNE_LOCAL_BW" vps_bw="$BBR_TUNE_VPS_BW" latency="$BBR_TUNE_LATENCY" mem_mb="$BBR_TUNE_MEMORY_MB" cc="$BBR_TUNE_CC" ecn="$BBR_TUNE_ECN" ramp="$BBR_TUNE_RAMP"
 
-  # 激进参数提示：默认画像含 OOM 时直接重启整机、内核 panic 后自动重启等参数，须用户确认才启用。
+  # 激进参数提示：默认画像不包含这些参数，须用户确认才额外启用。
   local _panic_choice=""
-  echo -e "  ${YELLOW}[提示] 默认画像包含激进参数：内存耗尽时直接重启整机（vm.panic_on_oom=1）、内核 panic 后自动重启（kernel.panic=1），另含 SysRq 开启与 core_pattern 设置。适用于追求极致可用性的场景，但可能在内存不足时丢失未保存数据。${NC}"
-  read -r -p "> 是否启用这些激进参数？(y/n, 默认 n): " _panic_choice
+  echo -e "  ${YELLOW}[提示] 默认画像不包含激进参数。如需额外启用：内存耗尽时直接重启整机（vm.panic_on_oom=1）、内核 panic 后自动重启（kernel.panic=1），另含 SysRq 开启与 core_pattern 设置。适用于追求极致可用性的场景，但可能在内存不足时丢失未保存数据。${NC}"
+  read -r -p "> 是否额外启用这些激进参数？(y/n, 默认 n): " _panic_choice
   local _profile_panic="0"
   [[ "${_panic_choice// /}" =~ ^[yY]$ ]] && _profile_panic="1"
 
@@ -3324,6 +3331,14 @@ _lumina_gen_hex() {
   openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+# 只去掉首尾空白，保留中间空格：密码/密钥含空格时不能悄悄改写，否则登录会失败。
+_trim_ws() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  printf '%s' "$v"
+}
+
 # 部署时自动生成的管理员密码只在安装成功时显示一次，不写入日志、不在状态页显示。
 LUMINA_GENERATED_PASSWORD=""
 
@@ -3352,7 +3367,7 @@ _lumina_write_env_if_missing() {
 
   if [ "$deploy_mode" = "1" ]; then
     while true; do
-      read -r -p "> 主站域名（如 img.example.com）: " app_domain
+      read -r -p "> 主站域名（如 img.example.com）: " app_domain || return 1
       app_domain="${app_domain// /}"
       if _valid_domain_name "$app_domain"; then
         break
@@ -3411,7 +3426,7 @@ _lumina_write_env_if_missing() {
   default_pass="Lumina_$(_lumina_gen_hex 6)!"
   read -r -s -p "> 管理员密码 [回车自动生成]: " admin_pass
   echo ""
-  admin_pass="${admin_pass// /}"
+  admin_pass="$(_trim_ws "$admin_pass")"
   if [ -z "$admin_pass" ]; then
     admin_pass="$default_pass"
     LUMINA_GENERATED_PASSWORD="$admin_pass"
@@ -3422,15 +3437,27 @@ _lumina_write_env_if_missing() {
   r2_enabled="false"; r2_endpoint=""; r2_bucket=""; r2_key_id=""; r2_key_secret=""
   if confirm_action "启用外部 S3 / R2 存储" "n"; then
     r2_enabled="true"
-    read -r -p "> R2 Endpoint URL: " r2_endpoint
-    r2_endpoint="${r2_endpoint// /}"
-    read -r -p "> R2 Bucket: " r2_bucket
-    r2_bucket="${r2_bucket// /}"
-    read -r -p "> R2 Access Key ID: " r2_key_id
-    r2_key_id="${r2_key_id// /}"
-    read -r -s -p "> R2 Secret Access Key: " r2_key_secret
-    echo ""
-    r2_key_secret="${r2_key_secret// /}"
+    while [ -z "$r2_endpoint" ]; do
+      read -r -p "> R2 Endpoint URL（必填）: " r2_endpoint || return 1
+      r2_endpoint="${r2_endpoint// /}"
+      [ -z "$r2_endpoint" ] && echo -e "${RED}[错误] Endpoint 不能为空，请重新输入。${NC}"
+    done
+    while [ -z "$r2_bucket" ]; do
+      read -r -p "> R2 Bucket（必填）: " r2_bucket || return 1
+      r2_bucket="${r2_bucket// /}"
+      [ -z "$r2_bucket" ] && echo -e "${RED}[错误] Bucket 不能为空，请重新输入。${NC}"
+    done
+    while [ -z "$r2_key_id" ]; do
+      read -r -p "> R2 Access Key ID（必填）: " r2_key_id || return 1
+      r2_key_id="${r2_key_id// /}"
+      [ -z "$r2_key_id" ] && echo -e "${RED}[错误] Access Key ID 不能为空，请重新输入。${NC}"
+    done
+    while [ -z "$r2_key_secret" ]; do
+      read -r -s -p "> R2 Secret Access Key（必填）: " r2_key_secret || return 1
+      echo ""
+      r2_key_secret="$(_trim_ws "$r2_key_secret")"
+      [ -z "$r2_key_secret" ] && echo -e "${RED}[错误] Secret Access Key 不能为空，请重新输入。${NC}"
+    done
     echo -e "  ${YELLOW}[提示] R2 公开访问域名（R2_PUBLIC_URL）保持留空：留空时图片直链走图片域名 /raw/；填了反而无法访问。${NC}"
   fi
 
@@ -3513,13 +3540,20 @@ _lumina_sync_env() {
   [ -f "$env_file" ] || return 1
 
   # 只补缺失的键，绝不覆盖已有值；缺失的密钥现生成。
+  # ADMIN_PASSWORD 缺失时先生成一次并记下来：写进文件和显示给用户必须是同一个值，
+  # 否则补生成的密码谁也不知道，管理员会被锁在门外。
+  local _admin_pass_missing=0 _generated_admin_pass=""
+  if ! grep -q "^ADMIN_PASSWORD=" "$env_file"; then
+    _admin_pass_missing=1
+    _generated_admin_pass="Lumina_$(_lumina_gen_hex 6)!"
+  fi
   _lumina_ensure_env_key "$env_file" "APP_DOMAIN" ":80"
   _lumina_ensure_env_key "$env_file" "CDN_DOMAIN" ":8088"
   _lumina_ensure_env_key "$env_file" "APP_PUBLIC_URL" "http://localhost"
   _lumina_ensure_env_key "$env_file" "CDN_PUBLIC_URL" "http://localhost"
   _lumina_ensure_env_key "$env_file" "ADMIN_USERNAME" "admin"
   _lumina_ensure_env_key "$env_file" "ADMIN_EMAIL" "admin@example.com"
-  _lumina_ensure_env_key "$env_file" "ADMIN_PASSWORD" "Lumina_$(_lumina_gen_hex 6)!"
+  _lumina_ensure_env_key "$env_file" "ADMIN_PASSWORD" "$_generated_admin_pass"
   _lumina_ensure_env_key "$env_file" "JWT_SECRET" "$(_lumina_gen_hex 32)"
   _lumina_ensure_env_key "$env_file" "LOCAL_SIGN_SECRET" "$(_lumina_gen_hex 32)"
   _lumina_ensure_env_key "$env_file" "POSTGRES_DB" "lumina"
@@ -3556,6 +3590,10 @@ _lumina_sync_env() {
   _lumina_ensure_env_key "$env_file" "SMTP_USER" ""
   _lumina_ensure_env_key "$env_file" "SMTP_PASS" ""
   _lumina_ensure_env_key "$env_file" "SMTP_FROM" ""
+  # 刚补生成的管理员密码记下来，安装成功时只显示一次（与首次安装的做法一致）。
+  if [ "$_admin_pass_missing" = "1" ]; then
+    LUMINA_GENERATED_PASSWORD="$_generated_admin_pass"
+  fi
 }
 
 _lumina_wait_healthy() {

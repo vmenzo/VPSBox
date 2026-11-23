@@ -473,17 +473,20 @@ def fetch_omnitt_evidence():
 
 
 def main():
-    parser = argparse.ArgumentParser(description='TCP tuning verification report (development tool).')
-    parser.add_argument('--dry-run', action='store_true', help='do not write any sysctl value; only read back current values for comparison')
+    parser = argparse.ArgumentParser(description='TCP tuning verification report (development tool). Runs in dry-run mode by default and changes nothing on the system; pass --apply to actually write sysctl values.')
+    parser.add_argument('--dry-run', action='store_true', help='dry-run only: do not write any sysctl value; only read back current values for comparison (this is the default behaviour)')
+    parser.add_argument('--apply', action='store_true', help='actually write sysctl values; without this flag the tool runs in dry-run mode and changes nothing')
     args = parser.parse_args()
-    if args.dry_run:
-        print('dry-run: no sysctl values will be written')
+    # 默认 dry-run：不带 --apply 就不写系统；--dry-run 显式指定时也一样。
+    dry_run = args.dry_run or not args.apply
+    if dry_run:
+        print('dry-run: no sysctl values will be written (use --apply to actually write values)')
     omnitt = fetch_omnitt_evidence()
     scenario_reports = []
     aggregate_total = aggregate_applied = aggregate_matched = 0
     for sc in SCENARIOS:
         profile = current_vpsbox_profile(sc['local_bw'], sc['vps_bw'], sc['latency'], sc['mem'], sc['ramp'], sc['cc'], sc['ecn'])
-        apply_report = sysctl_apply_and_readback(profile, dry_run=args.dry_run)
+        apply_report = sysctl_apply_and_readback(profile, dry_run=dry_run)
         aggregate_total += apply_report['total']
         aggregate_applied += apply_report['applied']
         aggregate_matched += apply_report['matched']
@@ -509,7 +512,7 @@ def main():
         'readback_match_ratio_of_applied': aggregate_matched / aggregate_applied if aggregate_applied else 0,
     }
     report = {
-        'dry_run': args.dry_run,
+        'dry_run': dry_run,
         'omnitt_source': OMNITT_META,
         'omnitt_evidence': omnitt,
         'comparison_possible': False,
