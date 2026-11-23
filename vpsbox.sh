@@ -42,9 +42,8 @@ XRAY_SERVICE_FILE="/etc/systemd/system/xray.service"
 SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
 PORT_FORWARD_STATE_DIR="/etc/vpsbox_port_forward"
 PORT_FORWARD_SERVICE_DIR="/etc/systemd/system"
-PICVAULT_REPO_URL="https://github.com/vmenzo/PicVault.git"
-PICVAULT_INSTALL_DIR="/opt/picvault"
-PICVAULT_DEFAULT_PORT="7899"
+LUMINA_REPO_URL="https://github.com/vmenzo/Lumina.git"
+LUMINA_INSTALL_DIR="/opt/lumina"
 NODESEEK_BOT_REPO_URL="https://github.com/vmenzo/NodeSeek-Bot.git"
 NODESEEK_BOT_INSTALL_DIR="/opt/NodeSeek-Bot"
 NODESEEK_BOT_INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/vmenzo/NodeSeek-Bot/main/install_vps.sh"
@@ -3257,17 +3256,24 @@ fi
 pause_for_enter
 }
 
-_picvault_compose() {
+_lumina_compose() {
+  local compose_cmd=""
   if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
+    compose_cmd="docker compose"
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose "$@"
+    compose_cmd="docker-compose"
   else
     return 127
   fi
+  # compose 文件在 deploy/ 下；IP 模式（APP_DOMAIN=:80）追加 local 覆盖文件（Caddy 只绑 80）
+  local files=(-f deploy/docker-compose.yml)
+  local app_domain=""
+  app_domain=$(grep -E '^APP_DOMAIN=' "$LUMINA_INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2-)
+  [ "$app_domain" = ":80" ] && files+=(-f deploy/docker-compose.local.yml)
+  $compose_cmd --env-file .env "${files[@]}" "$@"
 }
 
-_picvault_require_docker() {
+_lumina_require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     echo -e "${YELLOW}[提示] 未检测到 Docker。${NC}"
     if confirm_action "现在安装 Docker 与 Docker Compose"; then
@@ -3314,110 +3320,248 @@ _picvault_require_docker() {
   fi
 }
 
-_picvault_generate_secret() {
-  openssl rand -hex 24 2>/dev/null || date +%s%N | sha256sum | awk '{print $1}'
+_lumina_gen_hex() {
+  openssl rand -hex "$1" 2>/dev/null || head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
-_picvault_public_url() {
-  local port="$1" public_url=""
-  _ensure_ip
-  printf '\n' >&2
-  read -r -p "> 访问域名或公网 URL（可留空自动使用服务器 IP:${port}）: " public_url
-  public_url="${public_url// /}"
-  if [ -n "$public_url" ]; then
-    case "$public_url" in
-      http://*|https://*) echo "$public_url" ;;
-      *) echo "https://${public_url}" ;;
-    esac
-    return
-  fi
-  echo "http://${SERVER_IP}:${port}"
-}
+# 部署时自动生成的管理员密码只在安装成功时显示一次，不写入日志、不在状态页显示。
+LUMINA_GENERATED_PASSWORD=""
 
-_picvault_write_env_if_missing() {
-  local env_file="$PICVAULT_INSTALL_DIR/.env"
+_lumina_write_env_if_missing() {
+  local env_file="$LUMINA_INSTALL_DIR/.env"
   [ -f "$env_file" ] && return 0
 
-  local port public_url pg_password
+  local deploy_mode app_domain cdn_domain app_public_url cdn_public_url
+  local admin_user admin_email admin_pass default_pass
+  local r2_enabled r2_endpoint r2_bucket r2_key_id r2_key_secret
+  local jwt_secret local_sign_secret pg_pass redis_pass img_key img_salt
+  local server_ip ip_input p
+
+  # --- 部署模式 ---
   echo ""
-  read -r -p "> PicVault 宿主机端口 [${PICVAULT_DEFAULT_PORT}]: " port
-  port="${port// /}"
-  [ -z "$port" ] && port="$PICVAULT_DEFAULT_PORT"
-  if ! _valid_port "$port"; then
-    echo -e "${RED}[错误] 端口无效。${NC}"
-    return 1
-  fi
-  if _port_is_listening "$port" tcp; then
-    echo -e "${YELLOW}[警告] TCP ${port} 已被占用，继续部署可能失败。${NC}"
-    if ! confirm_action "继续使用端口 ${port}" "n"; then
+  echo -e "  ${CYAN}部署模式：${NC}"
+  echo -e "  ${GREEN}1.${NC} 域名模式（HTTPS，Caddy 自动签发证书，需要 80 和 443 端口空闲）"
+  echo -e "  ${GREEN}2.${NC} IP 模式（HTTP，仅需 80 端口）"
+  read -r -p "> 请选择 [1/2，默认 2]: " deploy_mode
+  deploy_mode="${deploy_mode// /}"
+  [ -z "$deploy_mode" ] && deploy_mode="2"
+  case "$deploy_mode" in
+    1|2) ;;
+    *) echo -e "${RED}[错误] 模式只能选择 1 或 2。${NC}"; return 1 ;;
+  esac
+
+  if [ "$deploy_mode" = "1" ]; then
+    while true; do
+      read -r -p "> 主站域名（如 img.example.com）: " app_domain
+      app_domain="${app_domain// /}"
+      if _valid_domain_name "$app_domain"; then
+        break
+      fi
+      echo -e "${RED}[错误] 域名格式无效，请重新输入。${NC}"
+    done
+    read -r -p "> 独立图片域名（可回车留空，与主站共用）: " cdn_domain
+    cdn_domain="${cdn_domain// /}"
+    if [ -n "$cdn_domain" ] && ! _valid_domain_name "$cdn_domain"; then
+      echo -e "${RED}[错误] 图片域名格式无效。${NC}"
       return 1
+    fi
+    app_public_url="https://${app_domain}"
+    if [ -z "$cdn_domain" ] || [ "$cdn_domain" = "$app_domain" ]; then
+      cdn_domain=":8088"
+      cdn_public_url="https://${app_domain}"
+    else
+      cdn_public_url="https://${cdn_domain}"
+    fi
+    for p in 80 443; do
+      if _port_is_listening "$p" tcp; then
+        echo -e "${YELLOW}[警告] TCP ${p} 已被占用，Caddy 无法监听，部署可能失败。${NC}"
+        if ! confirm_action "继续部署（Caddy 可能启动失败）" "n"; then
+          return 1
+        fi
+      fi
+    done
+  else
+    app_domain=":80"
+    cdn_domain=":8088"
+    _ensure_ip
+    server_ip="$SERVER_IP"
+    [ "$server_ip" = "未分配" ] && server_ip="127.0.0.1"
+    read -r -p "> 服务器 IP [默认 ${server_ip}]: " ip_input
+    ip_input="${ip_input// /}"
+    [ -n "$ip_input" ] && server_ip="$ip_input"
+    app_public_url="http://${server_ip}"
+    cdn_public_url="http://${server_ip}"
+    if _port_is_listening 80 tcp; then
+      echo -e "${YELLOW}[警告] TCP 80 已被占用，Caddy 无法监听，部署可能失败。${NC}"
+      if ! confirm_action "继续部署（Caddy 可能启动失败）" "n"; then
+        return 1
+      fi
     fi
   fi
 
-  public_url=$(_picvault_public_url "$port")
-  pg_password=$(_picvault_generate_secret)
+  # --- 管理员账号 ---
+  echo ""
+  echo -e "  ${CYAN}管理员账号（首次启动自动创建）：${NC}"
+  read -r -p "> 管理员用户名 [默认 admin]: " admin_user
+  admin_user="${admin_user// /}"
+  [ -z "$admin_user" ] && admin_user="admin"
+  read -r -p "> 管理员邮箱 [默认 admin@example.com]: " admin_email
+  admin_email="${admin_email// /}"
+  [ -z "$admin_email" ] && admin_email="admin@example.com"
+  default_pass="Lumina_$(_lumina_gen_hex 6)!"
+  read -r -s -p "> 管理员密码 [回车自动生成]: " admin_pass
+  echo ""
+  admin_pass="${admin_pass// /}"
+  if [ -z "$admin_pass" ]; then
+    admin_pass="$default_pass"
+    LUMINA_GENERATED_PASSWORD="$admin_pass"
+  fi
+
+  # --- 存储：R2 可选；R2_PUBLIC_URL 必须留空 ---
+  echo ""
+  r2_enabled="false"; r2_endpoint=""; r2_bucket=""; r2_key_id=""; r2_key_secret=""
+  if confirm_action "启用外部 S3 / R2 存储" "n"; then
+    r2_enabled="true"
+    read -r -p "> R2 Endpoint URL: " r2_endpoint
+    r2_endpoint="${r2_endpoint// /}"
+    read -r -p "> R2 Bucket: " r2_bucket
+    r2_bucket="${r2_bucket// /}"
+    read -r -p "> R2 Access Key ID: " r2_key_id
+    r2_key_id="${r2_key_id// /}"
+    read -r -s -p "> R2 Secret Access Key: " r2_key_secret
+    echo ""
+    r2_key_secret="${r2_key_secret// /}"
+    echo -e "  ${YELLOW}[提示] R2 公开访问域名（R2_PUBLIC_URL）保持留空：留空时图片直链走图片域名 /raw/；填了反而无法访问。${NC}"
+  fi
+
+  jwt_secret=$(_lumina_gen_hex 32)
+  local_sign_secret=$(_lumina_gen_hex 32)
+  pg_pass=$(_lumina_gen_hex 16)
+  redis_pass=$(_lumina_gen_hex 16)
+  img_key=$(_lumina_gen_hex 32)
+  img_salt=$(_lumina_gen_hex 32)
 
   cat > "$env_file" <<EOF
-POSTGRES_USER=picvault
-POSTGRES_PASSWORD=${pg_password}
-POSTGRES_DB=picvault
+APP_DOMAIN=${app_domain}
+CDN_DOMAIN=${cdn_domain}
+APP_PUBLIC_URL=${app_public_url}
+CDN_PUBLIC_URL=${cdn_public_url}
 
-APP_HOST_PORT=${port}
-APP_BIND_ADDRESS=0.0.0.0
-PICVAULT_BACKUP_DIR=/app/backups
-ALLOW_REGISTER=false
-VITE_ALLOW_REGISTER=false
-APP_PUBLIC_URL=${public_url}
+ADMIN_USERNAME=${admin_user}
+ADMIN_EMAIL=${admin_email}
+ADMIN_PASSWORD=${admin_pass}
 
-TRUST_PROXY=loopback, linklocal, uniquelocal
-ENABLE_HSTS=false
-TRUST_PROXY_HEADERS=false
-FRAME_ANCESTORS=self
-TOKEN_EXPIRES_IN=7d
-PASSWORD_RESET_EXPIRES_MINUTES=30
-RATE_LIMIT_WINDOW_MS=60000
-RATE_LIMIT_MAX=240
-ENABLE_SWAGGER=false
+JWT_SECRET=${jwt_secret}
+LOCAL_SIGN_SECRET=${local_sign_secret}
 
-S3_ENDPOINT=
-S3_UPLOAD_ENDPOINT=
-S3_REGION=us-east-1
-S3_BUCKET=
-S3_ACCESS_KEY=
-S3_SECRET_KEY=
-S3_FORCE_PATH_STYLE=true
-PUBLIC_IMAGE_BASE_URL=
+POSTGRES_DB=lumina
+POSTGRES_USER=lumina
+POSTGRES_PASSWORD=${pg_pass}
+REDIS_PASSWORD=${redis_pass}
 
-SMTP_ENABLED=false
+LOCAL_STORAGE_PATH=/data/uploads
+LOCAL_ENABLED=true
+
+R2_ENABLED=${r2_enabled}
+R2_ACCOUNT_ID=
+R2_ENDPOINT=${r2_endpoint}
+R2_BUCKET=${r2_bucket}
+R2_ACCESS_KEY_ID=${r2_key_id}
+R2_SECRET_ACCESS_KEY=${r2_key_secret}
+# R2_PUBLIC_URL 保持留空：留空时图片直链走图片域名 /raw/；填了反而无法访问
+R2_PUBLIC_URL=
+
+SMART_ROUTE_THRESHOLD_MB=5
+
+IMGPROXY_KEY=${img_key}
+IMGPROXY_SALT=${img_salt}
+
+CF_ZONE_ID=
+CF_API_TOKEN=
+MODERATION_WEBHOOK_URL=
+MODERATION_WEBHOOK_SECRET=
+UPLOAD_WEBHOOK_URL=
+UPLOAD_WEBHOOK_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+AI_API_BASE=https://api.openai.com/v1
+AI_API_KEY=
+AI_MODEL=gpt-4o-mini
+
 SMTP_HOST=
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USERNAME=
-SMTP_PASSWORD=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
 SMTP_FROM=
 EOF
 
+  mkdir -p "$LUMINA_INSTALL_DIR/data/uploads" "$LUMINA_INSTALL_DIR/backups"
   chmod 600 "$env_file" 2>/dev/null || true
-  echo -e "${GREEN}[完成] 已生成 PicVault 环境配置: ${env_file}${NC}"
+  echo -e "${GREEN}[完成] 已生成 Lumina 环境配置: ${env_file}${NC}"
 }
 
-_picvault_sync_env() {
-  local env_file="$PICVAULT_INSTALL_DIR/.env"
+_lumina_ensure_env_key() {
+  local env_file="$1" key="$2" value="$3"
+  grep -q "^${key}=" "$env_file" || echo "${key}=${value}" >> "$env_file"
+}
+
+_lumina_sync_env() {
+  local env_file="$LUMINA_INSTALL_DIR/.env"
   [ -f "$env_file" ] || return 1
 
-  if ! grep -q '^APP_BIND_ADDRESS=' "$env_file"; then
-    echo 'APP_BIND_ADDRESS=0.0.0.0' >> "$env_file"
-  fi
-  if ! grep -q '^TRUST_PROXY_HEADERS=' "$env_file"; then
-    echo 'TRUST_PROXY_HEADERS=false' >> "$env_file"
-  fi
+  # 只补缺失的键，绝不覆盖已有值；缺失的密钥现生成。
+  _lumina_ensure_env_key "$env_file" "APP_DOMAIN" ":80"
+  _lumina_ensure_env_key "$env_file" "CDN_DOMAIN" ":8088"
+  _lumina_ensure_env_key "$env_file" "APP_PUBLIC_URL" "http://localhost"
+  _lumina_ensure_env_key "$env_file" "CDN_PUBLIC_URL" "http://localhost"
+  _lumina_ensure_env_key "$env_file" "ADMIN_USERNAME" "admin"
+  _lumina_ensure_env_key "$env_file" "ADMIN_EMAIL" "admin@example.com"
+  _lumina_ensure_env_key "$env_file" "ADMIN_PASSWORD" "Lumina_$(_lumina_gen_hex 6)!"
+  _lumina_ensure_env_key "$env_file" "JWT_SECRET" "$(_lumina_gen_hex 32)"
+  _lumina_ensure_env_key "$env_file" "LOCAL_SIGN_SECRET" "$(_lumina_gen_hex 32)"
+  _lumina_ensure_env_key "$env_file" "POSTGRES_DB" "lumina"
+  _lumina_ensure_env_key "$env_file" "POSTGRES_USER" "lumina"
+  _lumina_ensure_env_key "$env_file" "POSTGRES_PASSWORD" "$(_lumina_gen_hex 16)"
+  _lumina_ensure_env_key "$env_file" "REDIS_PASSWORD" "$(_lumina_gen_hex 16)"
+  _lumina_ensure_env_key "$env_file" "LOCAL_STORAGE_PATH" "/data/uploads"
+  _lumina_ensure_env_key "$env_file" "LOCAL_ENABLED" "true"
+  _lumina_ensure_env_key "$env_file" "R2_ENABLED" "false"
+  _lumina_ensure_env_key "$env_file" "R2_ACCOUNT_ID" ""
+  _lumina_ensure_env_key "$env_file" "R2_ENDPOINT" ""
+  _lumina_ensure_env_key "$env_file" "R2_BUCKET" ""
+  _lumina_ensure_env_key "$env_file" "R2_ACCESS_KEY_ID" ""
+  _lumina_ensure_env_key "$env_file" "R2_SECRET_ACCESS_KEY" ""
+  _lumina_ensure_env_key "$env_file" "R2_PUBLIC_URL" ""
+  _lumina_ensure_env_key "$env_file" "SMART_ROUTE_THRESHOLD_MB" "5"
+  _lumina_ensure_env_key "$env_file" "IMGPROXY_KEY" "$(_lumina_gen_hex 32)"
+  _lumina_ensure_env_key "$env_file" "IMGPROXY_SALT" "$(_lumina_gen_hex 32)"
+  _lumina_ensure_env_key "$env_file" "CF_ZONE_ID" ""
+  _lumina_ensure_env_key "$env_file" "CF_API_TOKEN" ""
+  _lumina_ensure_env_key "$env_file" "MODERATION_WEBHOOK_URL" ""
+  _lumina_ensure_env_key "$env_file" "MODERATION_WEBHOOK_SECRET" ""
+  _lumina_ensure_env_key "$env_file" "UPLOAD_WEBHOOK_URL" ""
+  _lumina_ensure_env_key "$env_file" "UPLOAD_WEBHOOK_SECRET" ""
+  _lumina_ensure_env_key "$env_file" "GITHUB_CLIENT_ID" ""
+  _lumina_ensure_env_key "$env_file" "GITHUB_CLIENT_SECRET" ""
+  _lumina_ensure_env_key "$env_file" "GOOGLE_CLIENT_ID" ""
+  _lumina_ensure_env_key "$env_file" "GOOGLE_CLIENT_SECRET" ""
+  _lumina_ensure_env_key "$env_file" "AI_API_BASE" "https://api.openai.com/v1"
+  _lumina_ensure_env_key "$env_file" "AI_API_KEY" ""
+  _lumina_ensure_env_key "$env_file" "AI_MODEL" "gpt-4o-mini"
+  _lumina_ensure_env_key "$env_file" "SMTP_HOST" ""
+  _lumina_ensure_env_key "$env_file" "SMTP_PORT" "587"
+  _lumina_ensure_env_key "$env_file" "SMTP_USER" ""
+  _lumina_ensure_env_key "$env_file" "SMTP_PASS" ""
+  _lumina_ensure_env_key "$env_file" "SMTP_FROM" ""
 }
 
-_picvault_wait_healthy() {
+_lumina_wait_healthy() {
   local attempt
   for attempt in $(seq 1 60); do
-    if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T frontend \
-      node -e "fetch('http://127.0.0.1:7899/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))") >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1/api/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -3425,206 +3569,214 @@ _picvault_wait_healthy() {
   return 1
 }
 
-_picvault_clone_or_update() {
-  if [ ! -d "$PICVAULT_INSTALL_DIR/.git" ]; then
-    if [ -e "$PICVAULT_INSTALL_DIR" ] && [ -n "$(ls -A "$PICVAULT_INSTALL_DIR" 2>/dev/null)" ]; then
-      echo -e "${RED}[错误] ${PICVAULT_INSTALL_DIR} 已存在且不是 Git 仓库，请先手动处理。${NC}"
+_lumina_clone_or_update() {
+  if [ ! -d "$LUMINA_INSTALL_DIR/.git" ]; then
+    if [ -e "$LUMINA_INSTALL_DIR" ] && [ -n "$(ls -A "$LUMINA_INSTALL_DIR" 2>/dev/null)" ]; then
+      echo -e "${RED}[错误] ${LUMINA_INSTALL_DIR} 已存在且不是 Git 仓库，请先手动处理。${NC}"
       return 1
     fi
-    mkdir -p "$(dirname "$PICVAULT_INSTALL_DIR")"
-    git clone "$PICVAULT_REPO_URL" "$PICVAULT_INSTALL_DIR"
+    mkdir -p "$(dirname "$LUMINA_INSTALL_DIR")"
+    git clone "$LUMINA_REPO_URL" "$LUMINA_INSTALL_DIR"
     return $?
   fi
 
-  git -C "$PICVAULT_INSTALL_DIR" pull --ff-only
+  git -C "$LUMINA_INSTALL_DIR" pull --ff-only
 }
 
-_picvault_show_access() {
-  local env_file="$PICVAULT_INSTALL_DIR/.env"
-  local port public_url
-  port=$(grep -E '^APP_HOST_PORT=' "$env_file" 2>/dev/null | cut -d= -f2-)
-  public_url=$(grep -E '^APP_PUBLIC_URL=' "$env_file" 2>/dev/null | cut -d= -f2-)
-  [ -z "$port" ] && port="$PICVAULT_DEFAULT_PORT"
-  [ -z "$public_url" ] && public_url="http://服务器IP:${port}"
+_lumina_show_access() {
+  local env_file="$LUMINA_INSTALL_DIR/.env"
+  local app_url cdn_url admin_user admin_email
+  app_url=$(grep -E '^APP_PUBLIC_URL=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  cdn_url=$(grep -E '^CDN_PUBLIC_URL=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  admin_user=$(grep -E '^ADMIN_USERNAME=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  admin_email=$(grep -E '^ADMIN_EMAIL=' "$env_file" 2>/dev/null | cut -d= -f2-)
+  [ -z "$app_url" ] && app_url="http://服务器IP"
+  [ -z "$admin_user" ] && admin_user="admin"
   echo ""
-  echo -e "  ${CYAN}访问地址:${NC} ${public_url}"
-  echo -e "  ${CYAN}本机端口:${NC} ${port}"
-  echo -e "  ${YELLOW}首次安装时，第一个注册成功的账号会自动成为管理员。${NC}"
+  echo -e "  ${CYAN}主站地址:${NC} ${app_url}"
+  [ -n "$cdn_url" ] && echo -e "  ${CYAN}图片域名:${NC} ${cdn_url}"
+  echo -e "  ${CYAN}管理员:${NC} ${admin_user} (${admin_email})"
+  echo -e "  ${YELLOW}首次登录请使用部署时设置的管理员账号密码。${NC}"
 }
 
-picvault_install_or_update() {
+lumina_install_or_update() {
   clear_screen; print_divider
-  print_center "[ PicVault 图床部署 / 更新 ]" "$CYAN"
-  echo -e "  ${CYAN}安装目录:${NC} ${PICVAULT_INSTALL_DIR}"
-  echo -e "  ${CYAN}仓库地址:${NC} ${PICVAULT_REPO_URL}"
+  print_center "[ Lumina 图床部署 / 更新 ]" "$CYAN"
+  echo -e "  ${CYAN}安装目录:${NC} ${LUMINA_INSTALL_DIR}"
+  echo -e "  ${CYAN}仓库地址:${NC} ${LUMINA_REPO_URL}"
   echo ""
-  if ! confirm_action "部署或更新 PicVault"; then pause_for_enter; return; fi
+  if ! confirm_action "部署或更新 Lumina"; then pause_for_enter; return; fi
 
-  _picvault_require_docker || { pause_for_enter; return; }
+  _lumina_require_docker || { pause_for_enter; return; }
   if ! command -v git >/dev/null 2>&1; then
     echo -e "${CYAN}>>> 正在安装 git...${NC}"
     _pkg_install git
   fi
   command -v git >/dev/null 2>&1 || { echo -e "${RED}[错误] git 安装失败。${NC}"; pause_for_enter; return; }
 
-  echo -e "\n${CYAN}>>> 正在拉取 PicVault 代码...${NC}"
-  _picvault_clone_or_update || { pause_for_enter; return; }
-  _picvault_write_env_if_missing || { pause_for_enter; return; }
-  _picvault_sync_env || { echo -e "${RED}[错误] PicVault 环境配置更新失败。${NC}"; pause_for_enter; return; }
+  echo -e "\n${CYAN}>>> 正在拉取 Lumina 代码...${NC}"
+  _lumina_clone_or_update || { pause_for_enter; return; }
+  _lumina_write_env_if_missing || { pause_for_enter; return; }
+  _lumina_sync_env || { echo -e "${RED}[错误] Lumina 环境配置更新失败。${NC}"; pause_for_enter; return; }
 
-  echo -e "\n${CYAN}>>> 正在构建并启动 PicVault，请耐心等待...${NC}"
-  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose up -d --build); then
-    local app_port
-    app_port=$(grep -E '^APP_HOST_PORT=' "$PICVAULT_INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2-)
-    [ -z "$app_port" ] && app_port="$PICVAULT_DEFAULT_PORT"
-    echo -e "\n${CYAN}>>> 正在等待 PicVault 健康检查...${NC}"
-    if _picvault_wait_healthy; then
-      echo -e "\n${GREEN}[成功] PicVault 已启动。${NC}"
-      _ufw_allow_if_active "$app_port" tcp
-      _picvault_show_access
+  echo -e "\n${CYAN}>>> 正在构建并启动 Lumina，请耐心等待...${NC}"
+  if (cd "$LUMINA_INSTALL_DIR" && _lumina_compose up -d --build); then
+    echo -e "\n${CYAN}>>> 正在等待 Lumina 健康检查...${NC}"
+    if _lumina_wait_healthy; then
+      echo -e "\n${GREEN}[成功] Lumina 已启动。${NC}"
+      _ufw_allow_if_active 80 tcp
+      local app_domain=""
+      app_domain=$(grep -E '^APP_DOMAIN=' "$LUMINA_INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2-)
+      [ "$app_domain" != ":80" ] && _ufw_allow_if_active 443 tcp
+      if [ -n "$LUMINA_GENERATED_PASSWORD" ]; then
+        echo -e "  ${YELLOW}管理员密码（自动生成，仅显示一次，请妥善保存）:${NC} ${LUMINA_GENERATED_PASSWORD}"
+        LUMINA_GENERATED_PASSWORD=""
+      fi
+      _lumina_show_access
     else
-      echo -e "\n${RED}[错误] PicVault 容器已启动，但健康检查未通过，请查看日志。${NC}"
-      (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose ps)
+      echo -e "\n${RED}[错误] Lumina 容器已启动，但健康检查未通过，请查看日志。${NC}"
+      (cd "$LUMINA_INSTALL_DIR" && _lumina_compose ps)
     fi
   else
-    echo -e "\n${RED}[错误] PicVault 启动失败，请查看日志。${NC}"
+    echo -e "\n${RED}[错误] Lumina 启动失败，请查看日志。${NC}"
   fi
   pause_for_enter
 }
 
-picvault_status() {
+lumina_status() {
   clear_screen; print_divider
-  print_center "[ PicVault 运行状态 ]" "$CYAN"
-  _git_install_status "安装状态" "$PICVAULT_INSTALL_DIR" "$PICVAULT_REPO_URL" || true
-  if [ ! -d "$PICVAULT_INSTALL_DIR" ]; then
-    echo -e "\n${YELLOW}未检测到 PicVault 安装目录: ${PICVAULT_INSTALL_DIR}${NC}"
+  print_center "[ Lumina 运行状态 ]" "$CYAN"
+  _git_install_status "安装状态" "$LUMINA_INSTALL_DIR" "$LUMINA_REPO_URL" || true
+  if [ ! -d "$LUMINA_INSTALL_DIR" ]; then
+    echo -e "\n${YELLOW}未检测到 Lumina 安装目录: ${LUMINA_INSTALL_DIR}${NC}"
     pause_for_enter; return
   fi
-  if ! _picvault_require_docker; then pause_for_enter; return; fi
-  (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose ps)
-  _picvault_show_access
+  if ! _lumina_require_docker; then pause_for_enter; return; fi
+  (cd "$LUMINA_INSTALL_DIR" && _lumina_compose ps)
+  _lumina_show_access
   pause_for_enter
 }
 
-picvault_logs() {
+lumina_logs() {
   clear_screen; print_divider
-  print_center "[ PicVault 服务日志 ]" "$CYAN"
-  if [ ! -d "$PICVAULT_INSTALL_DIR" ]; then
-    echo -e "\n${YELLOW}未检测到 PicVault 安装目录: ${PICVAULT_INSTALL_DIR}${NC}"
+  print_center "[ Lumina 服务日志 ]" "$CYAN"
+  if [ ! -d "$LUMINA_INSTALL_DIR" ]; then
+    echo -e "\n${YELLOW}未检测到 Lumina 安装目录: ${LUMINA_INSTALL_DIR}${NC}"
     pause_for_enter; return
   fi
-  if ! _picvault_require_docker; then pause_for_enter; return; fi
+  if ! _lumina_require_docker; then pause_for_enter; return; fi
   echo -e "  ${GREEN}1.${NC} 全部服务"
-  echo -e "  ${GREEN}2.${NC} frontend"
-  echo -e "  ${GREEN}3.${NC} backend"
-  echo -e "  ${GREEN}4.${NC} postgres"
-  echo -e "  ${GREEN}5.${NC} redis"
+  echo -e "  ${GREEN}2.${NC} web"
+  echo -e "  ${GREEN}3.${NC} api"
+  echo -e "  ${GREEN}4.${NC} worker"
+  echo -e "  ${GREEN}5.${NC} postgres"
+  echo -e "  ${GREEN}6.${NC} redis"
+  echo -e "  ${GREEN}7.${NC} imgproxy"
+  echo -e "  ${GREEN}8.${NC} caddy"
   echo -e "  ${GREEN}0.${NC} 返回"
   echo ""
   read -r -p "> 请选择: " log_opt
   log_opt="${log_opt// /}"
   case "$log_opt" in
-    1) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120) ;;
-    2) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 frontend) ;;
-    3) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 backend) ;;
-    4) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 postgres) ;;
-    5) (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose logs --tail=120 redis) ;;
+    1) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120) ;;
+    2) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 web) ;;
+    3) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 api) ;;
+    4) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 worker) ;;
+    5) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 postgres) ;;
+    6) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 redis) ;;
+    7) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 imgproxy) ;;
+    8) (cd "$LUMINA_INSTALL_DIR" && _lumina_compose logs --tail=120 caddy) ;;
     0) return 0 ;;
     *) echo -e "\n${RED}输入无效！${NC}" ;;
   esac
   pause_for_enter
 }
 
-picvault_restart() {
+lumina_restart() {
   clear_screen; print_divider
-  print_center "[ 重启 PicVault ]" "$CYAN"
-  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
-  _picvault_require_docker || { pause_for_enter; return; }
-  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose restart); then
-    echo -e "\n${GREEN}[成功] PicVault 已重启。${NC}"
+  print_center "[ 重启 Lumina ]" "$CYAN"
+  [ -d "$LUMINA_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 Lumina 安装目录。${NC}"; pause_for_enter; return; }
+  _lumina_require_docker || { pause_for_enter; return; }
+  if (cd "$LUMINA_INSTALL_DIR" && _lumina_compose restart); then
+    echo -e "\n${GREEN}[成功] Lumina 已重启。${NC}"
   else
     echo -e "\n${RED}[错误] 重启失败。${NC}"
   fi
   pause_for_enter
 }
 
-picvault_stop() {
+lumina_stop() {
   clear_screen; print_divider
-  print_center "[ 停止 PicVault ]" "$CYAN"
-  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
-  _picvault_require_docker || { pause_for_enter; return; }
-  if ! confirm_action "停止 PicVault 容器" "n"; then pause_for_enter; return; fi
-  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose stop); then
-    echo -e "\n${GREEN}[成功] PicVault 已停止，数据卷保留。${NC}"
+  print_center "[ 停止 Lumina ]" "$CYAN"
+  [ -d "$LUMINA_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 Lumina 安装目录。${NC}"; pause_for_enter; return; }
+  _lumina_require_docker || { pause_for_enter; return; }
+  if ! confirm_action "停止 Lumina 容器" "n"; then pause_for_enter; return; fi
+  if (cd "$LUMINA_INSTALL_DIR" && _lumina_compose stop); then
+    echo -e "\n${GREEN}[成功] Lumina 已停止，数据卷保留。${NC}"
   else
     echo -e "\n${RED}[错误] 停止失败。${NC}"
   fi
   pause_for_enter
 }
 
-picvault_backup() {
+lumina_backup() {
   clear_screen; print_divider
-  print_center "[ PicVault 本机备份 ]" "$CYAN"
-  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
-  _picvault_require_docker || { pause_for_enter; return; }
+  print_center "[ Lumina 本机备份 ]" "$CYAN"
+  [ -d "$LUMINA_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 Lumina 安装目录。${NC}"; pause_for_enter; return; }
+  _lumina_require_docker || { pause_for_enter; return; }
 
-  local backup_root backup_file stamp db_dump storage_dump
-  backup_root="/opt/picvault-backups"
+  local backup_root backup_file stamp db_dump
+  backup_root="/opt/lumina-backups"
   stamp=$(date +%Y%m%d-%H%M%S)
-  backup_file="${backup_root}/picvault-${stamp}.tgz"
+  backup_file="${backup_root}/lumina-${stamp}.tgz"
   db_dump="${backup_root}/database-${stamp}.sql"
-  storage_dump="${backup_root}/storage-${stamp}.tgz"
   mkdir -p "$backup_root"
 
-  echo -e "\n${CYAN}>>> 正在创建 PostgreSQL 逻辑备份、本机存储和项目配置归档...${NC}"
-  if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T postgres sh -lc 'pg_dump -U "${POSTGRES_USER:-picvault}" -d "${POSTGRES_DB:-picvault}"' > "$db_dump"); then
-    local tar_items=(".env" "docker-compose.yml")
-    local backup_items=("database-${stamp}.sql")
-    [ -d "$PICVAULT_INSTALL_DIR/backups" ] && tar_items+=("backups")
-    if (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose exec -T backend sh -lc 'test -d /app/backend/storage && tar -C /app/backend -czf - storage || true' > "$storage_dump") && [ -s "$storage_dump" ]; then
-      backup_items+=("storage-${stamp}.tgz")
-    else
-      rm -f "$storage_dump"
-      echo -e "${YELLOW}[提示] 未能导出本机存储目录，可能当前使用的是第三方对象存储或 backend 未运行。${NC}"
+  echo -e "\n${CYAN}>>> 正在创建 PostgreSQL 逻辑备份、本机图片和项目配置归档...${NC}"
+  if (cd "$LUMINA_INSTALL_DIR" && _lumina_compose exec -T postgres sh -lc 'pg_dump -U "${POSTGRES_USER:-lumina}" -d "${POSTGRES_DB:-lumina}"' > "$db_dump"); then
+    local tar_items=(".env" "deploy")
+    [ -d "$LUMINA_INSTALL_DIR/backups" ] && tar_items+=("backups")
+    if [ -d "$LUMINA_INSTALL_DIR/data/uploads" ] && [ -n "$(ls -A "$LUMINA_INSTALL_DIR/data/uploads" 2>/dev/null)" ]; then
+      tar_items+=("data")
     fi
     if tar -czf "$backup_file" \
-      -C "$PICVAULT_INSTALL_DIR" "${tar_items[@]}" \
-      -C "$backup_root" "${backup_items[@]}" 2>/dev/null; then
-      rm -f "$db_dump" "$storage_dump"
+      -C "$LUMINA_INSTALL_DIR" "${tar_items[@]}" \
+      -C "$backup_root" "database-${stamp}.sql" 2>/dev/null; then
+      rm -f "$db_dump"
       echo -e "\n${GREEN}[成功] 备份已生成:${NC} ${backup_file}"
-      echo -e "${YELLOW}说明: 已包含数据库、项目配置；如使用本机存储且 backend 可用，也会包含 storage 归档。${NC}"
+      echo -e "${YELLOW}说明: 已包含数据库、项目配置；如使用本机存储且有图片，也会包含 data/uploads 归档。${NC}"
     else
       echo -e "\n${RED}[错误] 归档备份失败。${NC}"
-      rm -f "$db_dump" "$storage_dump"
+      rm -f "$db_dump"
     fi
   else
     echo -e "\n${RED}[错误] 数据库备份失败。${NC}"
-    rm -f "$db_dump" "$storage_dump"
+    rm -f "$db_dump"
   fi
   pause_for_enter
 }
 
-picvault_uninstall() {
+lumina_uninstall() {
   clear_screen; print_divider
-  print_center "[ 卸载 PicVault ]" "$CYAN"
-  [ -d "$PICVAULT_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 PicVault 安装目录。${NC}"; pause_for_enter; return; }
-  _picvault_require_docker || { pause_for_enter; return; }
+  print_center "[ 卸载 Lumina ]" "$CYAN"
+  [ -d "$LUMINA_INSTALL_DIR" ] || { echo -e "\n${YELLOW}未检测到 Lumina 安装目录。${NC}"; pause_for_enter; return; }
+  _lumina_require_docker || { pause_for_enter; return; }
   echo -e "\n${YELLOW}[警告] 默认只停止并删除容器，保留代码目录、.env、backups 和 Docker 数据卷。${NC}"
   echo -e "  ${GREEN}1.${NC} 保留数据卸载"
-  echo -e "  ${RED}2.${NC} 删除容器和 Docker 数据卷（会删除数据库与本机图片）"
+  echo -e "  ${RED}2.${NC} 删除容器和 Docker 数据卷（会删除数据库；本机图片目录 data/uploads 保留，需手动删除）"
   echo -e "  ${GREEN}0.${NC} 返回"
   echo ""
   read -r -p "> 请选择: " un_opt
   un_opt="${un_opt// /}"
   case "$un_opt" in
     1)
-      if confirm_action "卸载 PicVault 容器并保留数据" "n"; then
-        (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose down)
+      if confirm_action "卸载 Lumina 容器并保留数据" "n"; then
+        (cd "$LUMINA_INSTALL_DIR" && _lumina_compose down)
       fi
       ;;
     2)
-      if confirm_action "删除 PicVault 容器和 Docker 数据卷" "n"; then
-        (cd "$PICVAULT_INSTALL_DIR" && _picvault_compose down -v)
+      if confirm_action "删除 Lumina 容器和 Docker 数据卷" "n"; then
+        (cd "$LUMINA_INSTALL_DIR" && _lumina_compose down -v)
       fi
       ;;
     0) return ;;
@@ -3633,10 +3785,10 @@ picvault_uninstall() {
   pause_for_enter
 }
 
-menu_picvault() {
+menu_lumina() {
 while true; do
-menu_header "PicVault 图床"
-_git_install_status "安装状态" "$PICVAULT_INSTALL_DIR" "$PICVAULT_REPO_URL" || true
+menu_header "Lumina 图床"
+_git_install_status "安装状态" "$LUMINA_INSTALL_DIR" "$LUMINA_REPO_URL" || true
 echo ""
 echo -e "  ${CYAN}部署与维护${NC}"
 menu_pair 1 "部署/更新" 2 "查看状态"
@@ -3644,16 +3796,16 @@ menu_pair 3 "查看日志" 4 "重启服务"
 menu_pair 5 "停止服务" 6 "本机备份"
 menu_single 7 "卸载"
 menu_back_hint
-_read_menu_choice pv_opt "> 请选择 [0-7]: "
-[ -z "$pv_opt" ] && continue
-case $pv_opt in
- 1) picvault_install_or_update ;;
- 2) picvault_status ;;
- 3) picvault_logs ;;
- 4) picvault_restart ;;
- 5) picvault_stop ;;
- 6) picvault_backup ;;
- 7) picvault_uninstall ;;
+_read_menu_choice lm_opt "> 请选择 [0-7]: "
+[ -z "$lm_opt" ] && continue
+case $lm_opt in
+ 1) lumina_install_or_update ;;
+ 2) lumina_status ;;
+ 3) lumina_logs ;;
+ 4) lumina_restart ;;
+ 5) lumina_stop ;;
+ 6) lumina_backup ;;
+ 7) lumina_uninstall ;;
  0) return ;;
  *) echo -e "\n${RED}[提示] 编号不存在！${NC}"; sleep 1 ;;
 esac
@@ -6827,7 +6979,7 @@ echo ""
 echo -e "  ${CYAN}更多功能${NC}"
 menu_pair 19 "磁盘分区" 20 "定时任务"
 menu_pair 21 "基础工具箱" 22 "脚本管理"
-menu_pair 23 "PicVault 图床" 24 "NodeSeek Bot"
+menu_pair 23 "Lumina 图床" 24 "NodeSeek Bot"
 menu_single 25 "AI 工具"
 
 echo ""
@@ -6859,7 +7011,7 @@ case $OPTION in
 20) crontab_manager ;;
 21) tools_manager ;;
 22) manage_script ;;
-23) menu_picvault ;;
+23) menu_lumina ;;
 24) menu_nodeseek_bot ;;
 25) menu_ai_tools ;;
  0) echo -e "\n${GREEN}[感谢使用] 正在退出...${NC}\n"; exit 0 ;;
@@ -6874,3 +7026,4 @@ if [ ! -t 0 ] && [ -r /dev/tty ] && [ -t 1 ]; then
 else
     _vpsbox_main
 fi
+

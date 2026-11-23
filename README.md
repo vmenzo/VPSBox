@@ -83,10 +83,10 @@ vpsbox
 
 ### 应用管理
 
-- PicVault 图床部署、更新、状态、日志、重启、停止、备份和卸载
+- Lumina 图床部署、更新、状态、日志、重启、停止、备份和卸载（域名 HTTPS / IP 两种模式）
 - NodeSeek Bot 部署、更新、手动运行、手动验证 Cookie、日志、配置编辑和卸载
 
-PicVault 默认关闭公开注册（部署后由管理员手动开启）；开启注册后，第一个注册成功的网页端账号会自动成为管理员。
+Lumina 管理员账号在部署时设置；如启用 R2 存储，R2_PUBLIC_URL 请留空，直链走图片域名 /raw/，填了反而无法访问。
 
 ### AI 工具
 
@@ -112,7 +112,7 @@ PicVault 默认关闭公开注册（部署后由管理员手动开启）；开�
 - Xray 配置目录：`/usr/local/etc/xray`
 - Sing-box 配置目录：`/etc/sing-box`
 - VPSBox 证书目录：`/etc/vpsbox-cert`
-- PicVault 安装目录：`/opt/picvault`
+- Lumina 安装目录：`/opt/lumina`
 - NodeSeek Bot 安装目录：`/opt/NodeSeek-Bot`
 - Codex CLI 配置目录：`~/.codex`
 - Claude Code 配置目录：`~/.claude`
